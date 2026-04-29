@@ -1171,14 +1171,13 @@ async function handleRequest(req, res) {
         });
 
         // BƯỚC 2: Navigate tới profile sau khi đã có cookie
+        // Dùng domcontentloaded thay networkidle2 — TikTok load request liên tục
+        // nên networkidle2 thường không bao giờ đạt được, gây timeout
         console.log(`[Follow] Navigating to https://www.tiktok.com/@${username}...`);
         await followPage.goto(`https://www.tiktok.com/@${username}`, {
-          waitUntil: "networkidle2",
+          waitUntil: "domcontentloaded",
           timeout: 60000
         });
-
-        // Chờ thêm để React render xong
-        await new Promise(r => setTimeout(r, 3000));
 
         const pageTitle = await followPage.title();
         const currentUrl = followPage.url();
@@ -1190,6 +1189,7 @@ async function handleRequest(req, res) {
         }
 
         // Tìm nút Follow — nhiều selector dự phòng
+        // Không dùng setTimeout cố định — waitForSelector tự chờ React render
         const SELECTORS = [
           'button[data-e2e="follow-button"]',
           'button[data-e2e="followButton"]',
@@ -1202,7 +1202,7 @@ async function handleRequest(req, res) {
 
         for (const sel of SELECTORS) {
           try {
-            followButton = await followPage.waitForSelector(sel, { timeout: 5000 });
+            followButton = await followPage.waitForSelector(sel, { timeout: 15000 });
             if (followButton) { usedSelector = sel; break; }
           } catch (_) {}
         }
