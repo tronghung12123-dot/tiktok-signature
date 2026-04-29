@@ -1118,19 +1118,33 @@ async function handleRequest(req, res) {
         return;
       }
 
+      // Dùng tab riêng biệt — tránh conflict với session SDK
+      let followPage = null;
       try {
         await initBrowser();
-        await ensurePageReady();
 
-        // Parse và set cookie
+        followPage = await browser.newPage();
+        await followPage.setUserAgent(DEFAULT_UA);
+        await followPage.setViewport({ width: 1920, height: 1080 });
+
+        // Chặn ảnh/media để load nhanh hơn
+        await followPage.setRequestInterception(true);
+        followPage.on("request", (r) => {
+          if (["image", "media", "font"].includes(r.resourceType())) r.abort();
+          else r.continue();
+        });
+
+        // Parse cookie string → array
         const cookieArray = [];
         for (const part of cookie.split(";")) {
           const p = part.trim();
           const idx = p.indexOf("=");
           if (idx === -1) continue;
+          const name = p.slice(0, idx).trim();
+          const value = p.slice(idx + 1).trim();
+          if (!name) continue;
           cookieArray.push({
-            name: p.slice(0, idx).trim(),
-            value: p.slice(idx + 1).trim(),
+            name, value,
             domain: ".tiktok.com",
             path: "/",
             httpOnly: false,
@@ -1139,104 +1153,98 @@ async function handleRequest(req, res) {
           });
         }
 
+        // BƯỚC 1: Vào trang chủ TikTok trước để set cookie đúng domain
+        await followPage.goto("https://www.tiktok.com/", {
+          waitUntil: "domcontentloaded",
+          timeout: 30000
+        });
+
         if (cookieArray.length > 0) {
-          await page.setCookie(...cookieArray);
-          console.log(`[Follow] Set ${cookieArray.length} cookies`);
+          await followPage.setCookie(...cookieArray);
+          console.log(`[Follow] Set ${cookieArray.length} cookies vào tab mới`);
         }
 
         // Bắt response follow API
         let followResponse = null;
-        const followResponseHandler = (response) => {
-          if (response.url().includes("commit/follow/user")) {
-            followResponse = response;
-          }
-        };
-        page.on("response", followResponseHandler);
+        followPage.on("response", (r) => {
+          if (r.url().includes("commit/follow/user")) followResponse = r;
+        });
 
+        // BƯỚC 2: Navigate tới profile sau khi đã có cookie
         console.log(`[Follow] Navigating to https://www.tiktok.com/@${username}...`);
-        await page.goto(`https://www.tiktok.com/@${username}`, {
-          waitUntil: "domcontentloaded",
+        await followPage.goto(`https://www.tiktok.com/@${username}`, {
+          waitUntil: "networkidle2",
           timeout: 60000
         });
 
-        // Chờ thêm để JS render xong
+        // Chờ thêm để React render xong
         await new Promise(r => setTimeout(r, 3000));
 
-        // Ghi log HTML snapshot để debug nếu cần
-        const pageTitle = await page.title();
-        console.log(`[Follow] Page title: "${pageTitle}"`);
+        const pageTitle = await followPage.title();
+        const currentUrl = followPage.url();
+        console.log(`[Follow] Title: "${pageTitle}" | URL: ${currentUrl}`);
 
-        // Danh sách selector dự phòng theo thứ tự ưu tiên
+        // Kiểm tra bị redirect về landing page hay không
+        if (!currentUrl.includes(`@${username}`)) {
+          throw new Error(`Cookie không hợp lệ hoặc hết hạn — bị redirect về: ${currentUrl}`);
+        }
+
+        // Tìm nút Follow — nhiều selector dự phòng
         const SELECTORS = [
           'button[data-e2e="follow-button"]',
           'button[data-e2e="followButton"]',
           '[data-e2e="follow-button"]',
           '[data-e2e="followButton"]',
-          // Tìm theo text nội dung
-          'button',
         ];
 
         let followButton = null;
         let usedSelector = null;
 
-        // Thử từng selector có data-e2e trước (timeout ngắn)
-        for (const sel of SELECTORS.slice(0, 4)) {
+        for (const sel of SELECTORS) {
           try {
-            followButton = await page.waitForSelector(sel, { timeout: 5000 });
-            if (followButton) {
-              usedSelector = sel;
-              console.log(`[Follow] Found button with selector: "${sel}"`);
-              break;
-            }
+            followButton = await followPage.waitForSelector(sel, { timeout: 5000 });
+            if (followButton) { usedSelector = sel; break; }
           } catch (_) {}
         }
 
-        // Fallback: tìm button chứa text "Follow" nếu không khớp selector
+        // Fallback: scan toàn bộ button theo text
         if (!followButton) {
-          console.log(`[Follow] data-e2e selectors failed, scanning all buttons for "Follow" text...`);
-          followButton = await page.evaluateHandle(() => {
-            const buttons = Array.from(document.querySelectorAll("button"));
-            return buttons.find(b => /^\s*(Follow|Follow Back)\s*$/i.test(b.innerText || "")) || null;
-          });
-          // evaluateHandle trả về JSHandle, kiểm tra null
-          const isNull = await page.evaluate(el => el === null, followButton);
-          if (isNull) {
-            followButton = null;
-          } else {
-            usedSelector = "text-scan";
-            console.log(`[Follow] Found button via text-scan`);
-          }
+          console.log(`[Follow] Selector không khớp, đang scan text button...`);
+          followButton = await followPage.evaluateHandle(() =>
+            Array.from(document.querySelectorAll("button"))
+              .find(b => /^\s*(Follow|Follow Back)\s*$/i.test(b.innerText || "")) || null
+          );
+          const isNull = await followPage.evaluate(el => el === null, followButton);
+          if (isNull) { followButton = null; } else { usedSelector = "text-scan"; }
         }
 
-        // Log tất cả button hiện có để debug
-        const allButtons = await page.evaluate(() =>
+        // Log tất cả button để debug
+        const allButtons = await followPage.evaluate(() =>
           Array.from(document.querySelectorAll("button"))
             .map(b => ({ e2e: b.getAttribute("data-e2e"), text: (b.innerText || "").trim().substring(0, 40) }))
         );
-        console.log(`[Follow] All buttons on page:`, JSON.stringify(allButtons));
+        console.log(`[Follow] All buttons:`, JSON.stringify(allButtons));
 
         if (!followButton) {
-          page.off("response", followResponseHandler);
           res.writeHead(500);
           res.end(JSON.stringify({
             ok: false,
             error: "Không tìm thấy nút Follow",
-            message: "Trang chưa load hoặc TikTok thay đổi selector",
-            debug: { pageTitle, allButtons }
+            message: "Trang chưa load đủ hoặc TikTok thay đổi selector",
+            debug: { pageTitle, currentUrl, allButtons }
           }));
           return;
         }
 
-        const buttonText = await page.evaluate(el => (el.innerText || "").trim(), followButton);
-        console.log(`[Follow] Button text: "${buttonText}" (selector: ${usedSelector})`);
+        const buttonText = await followPage.evaluate(el => (el.innerText || "").trim(), followButton);
+        console.log(`[Follow] Button: "${buttonText}" (selector: ${usedSelector})`);
 
         if (!buttonText.toLowerCase().includes("follow")) {
-          page.off("response", followResponseHandler);
           res.writeHead(200);
           res.end(JSON.stringify({
             ok: false,
             error: `Nút không phải Follow ("${buttonText}")`,
-            message: "Có thể đã follow trước đó hoặc chưa đăng nhập",
+            message: "Có thể đã follow trước đó hoặc cookie của tài khoản khác",
             debug: { pageTitle, buttonText }
           }));
           return;
@@ -1245,18 +1253,17 @@ async function handleRequest(req, res) {
         await followButton.click();
         console.log(`[Follow] Clicked Follow button`);
 
-        // Chờ response API (tối đa 8 giây)
+        // Chờ response API tối đa 8 giây
         const waitStart = Date.now();
         while (!followResponse && Date.now() - waitStart < 8000) {
           await new Promise(r => setTimeout(r, 200));
         }
-        page.off("response", followResponseHandler);
 
         if (followResponse) {
           let respBody = "";
           try { respBody = await followResponse.text(); } catch (_) {}
           const statusCode = followResponse.status();
-          console.log(`[Follow] API response HTTP ${statusCode}: ${respBody.substring(0, 300)}`);
+          console.log(`[Follow] API HTTP ${statusCode}: ${respBody.substring(0, 300)}`);
 
           let parsedData = null;
           try { parsedData = JSON.parse(respBody); } catch (_) {}
@@ -1270,9 +1277,11 @@ async function handleRequest(req, res) {
             message: statusCode === 200 ? "Follow thành công" : `Lỗi HTTP ${statusCode}`
           }));
         } else {
-          // Không bắt được response — kiểm tra trạng thái nút xem đã đổi chưa
-          const newButtonText = await page.evaluate(el => (el.innerText || "").trim(), followButton).catch(() => "unknown");
-          console.log(`[Follow] No API response captured. New button text: "${newButtonText}"`);
+          // Không bắt được API response — kiểm tra nút có đổi text không
+          const newButtonText = await followPage.evaluate(
+            el => (el.innerText || "").trim(), followButton
+          ).catch(() => "unknown");
+          console.log(`[Follow] No API response. New button text: "${newButtonText}"`);
           const likelySuccess = /following|unfollow/i.test(newButtonText);
           res.writeHead(likelySuccess ? 200 : 500);
           res.end(JSON.stringify({
@@ -1280,14 +1289,21 @@ async function handleRequest(req, res) {
             error: likelySuccess ? null : "Không nhận được phản hồi từ API follow",
             message: likelySuccess
               ? `Có vẻ đã follow (nút đổi thành "${newButtonText}")`
-              : "Bị chặn, CAPTCHA hoặc chưa đăng nhập",
+              : "Bị chặn, CAPTCHA hoặc chưa đăng nhập đúng tài khoản",
             debug: { newButtonText }
           }));
         }
+
       } catch (e) {
         console.error("[Follow] Lỗi:", e.message);
         res.writeHead(500);
         res.end(JSON.stringify({ ok: false, error: e.message, message: "Lỗi server khi follow" }));
+      } finally {
+        // Luôn đóng tab follow để giải phóng bộ nhớ
+        if (followPage) {
+          try { await followPage.close(); } catch (_) {}
+          console.log(`[Follow] Tab đã đóng`);
+        }
       }
       return;
     }
