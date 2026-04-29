@@ -573,7 +573,7 @@ async function generateSignedUrl(
  * @param {string} targetUrl - The URL to sign
  * @param {string|null} userAgent - Optional UA to return in response
  * @param {string|null} navigateTo - Optional TikTok page URL; when given,
- *   the response uses a page-intercept path instead of the default fast path.
+ * the response uses a page-intercept path instead of the default fast path.
  */
 async function _generateSignedUrlInternal(
   targetUrl,
@@ -942,9 +942,11 @@ async function handleRequest(req, res) {
       }
 
       let targetUrl = null;
+      let customCookies = null;
       try {
         const json = JSON.parse(body);
         targetUrl = json.url;
+        customCookies = json.cookie || json.cookies; // Hỗ trợ cả 2 tên biến
       } catch (e) {
         try {
           new URL(body.trim());
@@ -968,10 +970,35 @@ async function handleRequest(req, res) {
         targetUrl.substring(0, 80) + "...",
       );
 
+      // Nếu request truyền lên custom cookie, bóc tách và set vào page
+      if (customCookies && typeof customCookies === "string") {
+        try {
+          const targetDomain = new URL(targetUrl).hostname;
+          const cookieObjs = customCookies
+            .split(";")
+            .map((pair) => {
+              const [key, ...rest] = pair.trim().split("=");
+              return {
+                name: key.trim(),
+                value: rest.join("=").trim(),
+                domain: targetDomain,
+              };
+            })
+            .filter((c) => c.name); // Bỏ qua giá trị rỗng
+
+          if (cookieObjs.length > 0) {
+            await page.setCookie(...cookieObjs);
+            console.log(`[Server] Applied ${cookieObjs.length} custom cookies to browser.`);
+          }
+        } catch (cookieErr) {
+          console.error("[Server] Error parsing custom cookies:", cookieErr.message);
+        }
+      }
+
       const fetchResult = await page.evaluate(async (url) => {
         try {
           const response = await fetch(url, {
-            credentials: "include",
+            credentials: "include", // Đảm bảo cookie vừa set sẽ được đính kèm vào req
             headers: { Accept: "application/json" },
           });
           const text = await response.text();
