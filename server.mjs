@@ -1096,6 +1096,111 @@ async function handleRequest(req, res) {
       return;
     }
 
+    // ========== ENDPOINT FOLLOW (DÙNG TRÌNH DUYỆT ẢO) ==========
+    if (url.pathname === "/follow" && req.method === "POST") {
+      let body = "";
+      for await (const chunk of req) body += chunk;
+
+      let username, cookie;
+      try {
+        const json = JSON.parse(body);
+        username = json.username;
+        cookie = json.cookie;
+      } catch (e) {
+        res.writeHead(400);
+        res.end(JSON.stringify({ status: "error", message: "Invalid JSON" }));
+        return;
+      }
+
+      if (!username || !cookie) {
+        res.writeHead(400);
+        res.end(JSON.stringify({ status: "error", message: "Thiếu username hoặc cookie" }));
+        return;
+      }
+
+      try {
+        await initBrowser();
+        await ensurePageReady();
+
+        // Parse và set cookie
+        const cookieArray = [];
+        for (const part of cookie.split(";")) {
+          const p = part.trim();
+          const idx = p.indexOf("=");
+          if (idx === -1) continue;
+          cookieArray.push({
+            name: p.slice(0, idx).trim(),
+            value: p.slice(idx + 1).trim(),
+            domain: ".tiktok.com",
+            path: "/",
+            httpOnly: false,
+            secure: true,
+            sameSite: "None"
+          });
+        }
+
+        if (cookieArray.length > 0) {
+          await page.setCookie(...cookieArray);
+          console.log(`[Server] Set ${cookieArray.length} cookies for follow`);
+        }
+
+        let followResponse = null;
+        page.on("response", (response) => {
+          if (response.url().includes("commit/follow/user")) {
+            followResponse = response;
+          }
+        });
+
+        console.log(`[Server] Navigating to @${username}...`);
+        await page.goto(`https://www.tiktok.com/@${username}`, {
+          waitUntil: "domcontentloaded",
+          timeout: 30000
+        });
+
+        const followButton = await page.waitForSelector('button[data-e2e="follow-button"]', { timeout: 10000 });
+        if (followButton) {
+          const buttonText = await page.evaluate(el => el.innerText, followButton);
+          console.log(`[Server] Follow button text: "${buttonText}"`);
+
+          if (buttonText.toLowerCase().includes('follow')) {
+            await followButton.click();
+            console.log("[Server] Clicked Follow button");
+            await new Promise(resolve => setTimeout(resolve, 3000));
+
+            if (followResponse) {
+              const respBody = await followResponse.text();
+              const statusCode = followResponse.status();
+              console.log(`[Server] Follow API response (${statusCode}): ${respBody?.substring(0, 200)}`);
+              res.writeHead(200);
+              res.end(JSON.stringify({
+                ok: statusCode === 200,
+                status_code: statusCode,
+                raw: respBody?.substring(0, 200),
+                message: statusCode === 200 ? "Follow thành công" : `Lỗi HTTP ${statusCode}`
+              }));
+            } else {
+              console.log("[Server] Không bắt được response follow");
+              res.writeHead(500);
+              res.end(JSON.stringify({ ok: false, error: "Không nhận được phản hồi", message: "Bị chặn hoặc CAPTCHA" }));
+            }
+          } else {
+            console.log(`[Server] Nút không phải Follow ("${buttonText}")`);
+            res.writeHead(200);
+            res.end(JSON.stringify({ ok: false, error: "Nút không phải Follow", message: "Có thể đã follow trước đó" }));
+          }
+        } else {
+          console.log("[Server] Không tìm thấy nút Follow");
+          res.writeHead(500);
+          res.end(JSON.stringify({ ok: false, error: "Không tìm thấy nút Follow" }));
+        }
+      } catch (e) {
+        console.error("[Server] Lỗi /follow:", e);
+        res.writeHead(500);
+        res.end(JSON.stringify({ ok: false, error: e.message, message: "Lỗi server khi follow" }));
+      }
+      return;
+    }
+
     // 404
     res.writeHead(404);
     res.end(JSON.stringify({ error: "Not found" }));
