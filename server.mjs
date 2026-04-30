@@ -1451,27 +1451,40 @@ async function handleRequest(req, res) {
 
         for (const sel of SELECTORS) {
           try {
-            followButton = await followPage.waitForSelector(sel, { timeout: 20000 });
-            if (followButton) { usedSelector = sel; break; }
+            // Chờ selector xuất hiện
+            await followPage.waitForSelector(sel, { timeout: 20000 });
+            // Sau đó lấy nút ĐẦU TIÊN — thường là nút trên profile header
+            // (các nút trong feed load sau, index cao hơn)
+            followButton = await followPage.evaluateHandle((s) => {
+              const all = Array.from(document.querySelectorAll(s));
+              // Ưu tiên nút nằm cao nhất trên trang (offsetTop nhỏ nhất)
+              if (all.length === 0) return null;
+              return all.reduce((a, b) => {
+                const aTop = a.getBoundingClientRect().top + window.scrollY;
+                const bTop = b.getBoundingClientRect().top + window.scrollY;
+                return aTop <= bTop ? a : b;
+              });
+            }, sel);
+            const isNull = await followPage.evaluate(el => el === null, followButton);
+            if (!isNull) { usedSelector = sel; break; }
           } catch (_) {}
         }
 
-        // Fallback: tìm button có data-e2e="follow-button" bằng evaluate (không dùng text-scan)
-        // vì text-scan có thể chọn nút Follow ở sidebar thay vì profile
+        // Fallback: tìm đúng nút Follow của PROFILE (không phải suggested feed)
         if (!followButton) {
           followButton = await followPage.evaluateHandle(() => {
-            // Ưu tiên data-e2e trước
-            const byE2e = document.querySelector('[data-e2e="follow-button"], [data-e2e="followButton"]');
-            if (byE2e) return byE2e;
-            // Cuối cùng mới scan text — nhưng loại trừ nav/sidebar buttons
-            const allBtns = Array.from(document.querySelectorAll("button"));
-            return allBtns.find(b => {
-              const txt = (b.innerText || "").trim();
-              if (!/^(Follow|Follow Back)$/i.test(txt)) return false;
-              // Loại trừ button nằm trong nav/sidebar
-              const parent = b.closest('nav, header, aside, [class*="sidebar"], [class*="nav"]');
-              return !parent;
-            }) || null;
+            // Chiến lược 1: tìm trong vùng share-info / profile header
+            const profileArea = document.querySelector(
+              '[data-e2e="user-page"], [class*="ShareInfo"], [class*="profile-header"], [class*="userInfo"], main'
+            );
+            if (profileArea) {
+              const btn = profileArea.querySelector('[data-e2e="follow-button"], [data-e2e="followButton"]');
+              if (btn) return btn;
+            }
+            // Chiến lược 2: lấy nút follow-button ĐẦU TIÊN trên trang (trước feed)
+            const first = document.querySelector('[data-e2e="follow-button"], [data-e2e="followButton"]');
+            if (first) return first;
+            return null;
           });
           const isNull = await followPage.evaluate(el => el === null, followButton);
           if (isNull) { followButton = null; } else { usedSelector = "evaluate-fallback"; }
