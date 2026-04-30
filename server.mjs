@@ -1390,15 +1390,25 @@ async function handleRequest(req, res) {
           });
         }
 
-        // Bước 1: vào trang chủ để set cookie đúng domain
-        await followPage.goto("https://www.tiktok.com/", {
-          waitUntil: "domcontentloaded",
-          timeout: 30000
-        });
-
+        // Bước 1: Set cookie trực tiếp mà không cần navigate trang chủ
+        // Dùng addScriptTag để set domain context, tránh chrome-error
         if (cookieArray.length > 0) {
-          await followPage.setCookie(...cookieArray);
-          console.log(`[FollowTool] Set ${cookieArray.length} cookies`);
+          // Set cookie qua CDP trực tiếp — không cần navigate
+          const client = await followPage.createCDPSession();
+          for (const c of cookieArray) {
+            try {
+              await client.send("Network.setCookie", {
+                name: c.name,
+                value: c.value,
+                domain: c.domain,
+                path: c.path,
+                secure: c.secure,
+                sameSite: c.sameSite,
+              });
+            } catch (_) {}
+          }
+          await client.detach();
+          console.log(`[FollowTool] Set ${cookieArray.length} cookies via CDP`);
         }
 
         // Bắt response follow API
