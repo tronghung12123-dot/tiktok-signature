@@ -1336,7 +1336,7 @@ async function handleRequest(req, res) {
         }
         // Nếu truyền username thì tạo targetUrl
         if (username && !targetUrl) {
-          targetUrl = `https://www.tiktok.com/@\${username}`;
+          targetUrl = `https://www.tiktok.com/@${username}`;
         }
       } catch (e) {
         res.writeHead(400);
@@ -1353,7 +1353,7 @@ async function handleRequest(req, res) {
         return;
       }
 
-      console.log(`[FollowTool] Nhận yêu cầu follow @\${username}`);
+      console.log(`[FollowTool] Nhận yêu cầu follow @${username}`);
 
       let followPage = null;
       try {
@@ -1398,7 +1398,7 @@ async function handleRequest(req, res) {
 
         if (cookieArray.length > 0) {
           await followPage.setCookie(...cookieArray);
-          console.log(`[FollowTool] Set \${cookieArray.length} cookies`);
+          console.log(`[FollowTool] Set ${cookieArray.length} cookies`);
         }
 
         // Bắt response follow API
@@ -1408,7 +1408,7 @@ async function handleRequest(req, res) {
         });
 
         // Bước 2: Navigate tới profile
-        console.log(`[FollowTool] Đang mở \${targetUrl}...`);
+        console.log(`[FollowTool] Đang mở ${targetUrl}...`);
         await followPage.goto(targetUrl, {
           waitUntil: "domcontentloaded",
           timeout: 60000
@@ -1416,11 +1416,11 @@ async function handleRequest(req, res) {
 
         const pageTitle = await followPage.title();
         const currentUrl = followPage.url();
-        console.log(`[FollowTool] Title: "\${pageTitle}" | URL: \${currentUrl}`);
+        console.log(`[FollowTool] Title: "${pageTitle}" | URL: ${currentUrl}`);
 
         // Kiểm tra bị redirect (cookie hết hạn / sai)
-        if (!currentUrl.includes(`@\${username}`)) {
-          throw new Error(`Cookie không hợp lệ hoặc hết hạn — bị redirect về: \${currentUrl}`);
+        if (!currentUrl.includes(`@${username}`)) {
+          throw new Error(`Cookie không hợp lệ hoặc hết hạn — bị redirect về: ${currentUrl}`);
         }
 
         // Tìm nút Follow
@@ -1470,7 +1470,7 @@ async function handleRequest(req, res) {
         }
 
         const buttonText = await followPage.evaluate(el => (el.innerText || "").trim(), followButton);
-        console.log(`[FollowTool] Nút: "\${buttonText}" (selector: \${usedSelector})`);
+        console.log(`[FollowTool] Nút: "${buttonText}" (selector: ${usedSelector})`);
 
         // Kiểm tra đã follow chưa
         if (/following|unfollow/i.test(buttonText)) {
@@ -1478,7 +1478,7 @@ async function handleRequest(req, res) {
           res.end(JSON.stringify({
             ok: true,
             already_followed: true,
-            message: `Đã follow @\${username} trước đó rồi`,
+            message: `Đã follow @${username} trước đó rồi`,
             button_text: buttonText
           }));
           return;
@@ -1488,7 +1488,7 @@ async function handleRequest(req, res) {
           res.writeHead(200);
           res.end(JSON.stringify({
             ok: false,
-            error: `Nút không phải Follow ("\${buttonText}")`,
+            error: `Nút không phải Follow ("${buttonText}")`,
             message: "Cookie có thể thuộc tài khoản khác hoặc chưa đăng nhập",
             debug: { pageTitle, buttonText }
           }));
@@ -1511,7 +1511,7 @@ async function handleRequest(req, res) {
           const statusCode = followResponse.status();
           let parsedData = null;
           try { parsedData = JSON.parse(respBody); } catch (_) {}
-          console.log(`[FollowTool] API HTTP \${statusCode}: \${respBody.substring(0, 200)}`);
+          console.log(`[FollowTool] API HTTP ${statusCode}: ${respBody.substring(0, 200)}`);
 
           res.writeHead(200);
           res.end(JSON.stringify({
@@ -1522,8 +1522,8 @@ async function handleRequest(req, res) {
             data: parsedData,
             raw: respBody.substring(0, 200),
             message: statusCode === 200
-              ? `Follow @\${username} thành công`
-              : `Lỗi HTTP \${statusCode}`
+              ? `Follow @${username} thành công`
+              : `Lỗi HTTP ${statusCode}`
           }));
         } else {
           // Không bắt được API — kiểm tra text nút
@@ -1531,14 +1531,14 @@ async function handleRequest(req, res) {
             el => (el.innerText || "").trim(), followButton
           ).catch(() => "unknown");
           const likelySuccess = /following|unfollow/i.test(newText);
-          console.log(`[FollowTool] Không bắt được API response. Nút mới: "\${newText}"`);
+          console.log(`[FollowTool] Không bắt được API response. Nút mới: "${newText}"`);
           res.writeHead(likelySuccess ? 200 : 500);
           res.end(JSON.stringify({
             ok: likelySuccess,
             target_username: username,
             target_url: targetUrl,
             message: likelySuccess
-              ? `Có vẻ đã follow @\${username} (nút đổi thành "\${newText}")`
+              ? `Có vẻ đã follow @${username} (nút đổi thành "${newText}")`
               : "Không nhận được phản hồi — có thể bị CAPTCHA hoặc chặn",
             debug: { newButtonText: newText }
           }));
