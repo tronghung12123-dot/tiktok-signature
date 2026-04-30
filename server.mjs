@@ -1423,7 +1423,12 @@ async function handleRequest(req, res) {
           throw new Error(`Cookie không hợp lệ hoặc hết hạn — bị redirect về: ${currentUrl}`);
         }
 
-        // Tìm nút Follow
+        // Scroll nhẹ để trigger lazy render của React
+        await followPage.evaluate(() => window.scrollBy(0, 300));
+        await new Promise(r => setTimeout(r, 1500));
+
+        // Tìm nút Follow — ưu tiên data-e2e chính xác trên profile
+        // Timeout 20s vì React cần thêm thời gian sau domcontentloaded
         const SELECTORS = [
           'button[data-e2e="follow-button"]',
           'button[data-e2e="followButton"]',
@@ -1436,19 +1441,30 @@ async function handleRequest(req, res) {
 
         for (const sel of SELECTORS) {
           try {
-            followButton = await followPage.waitForSelector(sel, { timeout: 15000 });
+            followButton = await followPage.waitForSelector(sel, { timeout: 20000 });
             if (followButton) { usedSelector = sel; break; }
           } catch (_) {}
         }
 
-        // Fallback: scan text button
+        // Fallback: tìm button có data-e2e="follow-button" bằng evaluate (không dùng text-scan)
+        // vì text-scan có thể chọn nút Follow ở sidebar thay vì profile
         if (!followButton) {
-          followButton = await followPage.evaluateHandle(() =>
-            Array.from(document.querySelectorAll("button"))
-              .find(b => /^\s*(Follow|Follow Back)\s*$/i.test(b.innerText || "")) || null
-          );
+          followButton = await followPage.evaluateHandle(() => {
+            // Ưu tiên data-e2e trước
+            const byE2e = document.querySelector('[data-e2e="follow-button"], [data-e2e="followButton"]');
+            if (byE2e) return byE2e;
+            // Cuối cùng mới scan text — nhưng loại trừ nav/sidebar buttons
+            const allBtns = Array.from(document.querySelectorAll("button"));
+            return allBtns.find(b => {
+              const txt = (b.innerText || "").trim();
+              if (!/^(Follow|Follow Back)$/i.test(txt)) return false;
+              // Loại trừ button nằm trong nav/sidebar
+              const parent = b.closest("nav, header, aside, [class*="sidebar"], [class*="nav"]");
+              return !parent;
+            }) || null;
+          });
           const isNull = await followPage.evaluate(el => el === null, followButton);
-          if (isNull) { followButton = null; } else { usedSelector = "text-scan"; }
+          if (isNull) { followButton = null; } else { usedSelector = "evaluate-fallback"; }
         }
 
         // Debug: log tất cả button
@@ -1495,14 +1511,21 @@ async function handleRequest(req, res) {
           return;
         }
 
-        // Click follow
-        await followButton.click();
-        console.log(`[FollowTool] Đã click Follow`);
+        // Click follow — dùng waitForResponse để bắt API chắc chắn hơn
+        console.log(`[FollowTool] Đang click Follow...`);
+        const followApiPromise = followPage.waitForResponse(
+          r => r.url().includes("commit/follow/user"),
+          { timeout: 15000 }
+        ).catch(() => null); // null nếu timeout
 
-        // Chờ API response tối đa 8 giây
-        const waitStart = Date.now();
-        while (!followResponse && Date.now() - waitStart < 8000) {
-          await new Promise(r => setTimeout(r, 200));
+        await followButton.click();
+        console.log(`[FollowTool] Đã click Follow, đang chờ API response...`);
+
+        // Chờ API response (waitForResponse đã set timeout 15s)
+        followResponse = await followApiPromise;
+        if (!followResponse) {
+          // Fallback: chờ thêm 3s rồi check
+          await new Promise(r => setTimeout(r, 3000));
         }
 
         if (followResponse) {
