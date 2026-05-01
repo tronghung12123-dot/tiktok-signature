@@ -1611,43 +1611,98 @@ async function handleRequest(req, res) {
           return;
         }
 
-        // Lấy cookie + msToken từ followPage để dùng cho request có signature
+        // Lấy cookie + các params từ trang để build URL đúng chuẩn TikTok
         const followCookies = await followPage.cookies();
         const followCookieStr = followCookies.map(c => `${c.name}=${c.value}`).join("; ");
-        const msTokenMatch2 = followCookieStr.match(/msToken=([^;]+)/);
-        const msToken2 = msTokenMatch2 ? msTokenMatch2[1] : "";
 
-        // Build URL follow API cần ký
+        // Lấy thêm device_id, verifyFp, WebIdLastTime, odinId từ page context
+        const pageFingerprint = await followPage.evaluate(() => {
+          // msToken — lấy cái cuối cùng (mới nhất)
+          const msTokens = document.cookie.match(/msToken=([^;]+)/g) || [];
+          const msToken = msTokens.length
+            ? msTokens[msTokens.length - 1].split("=").slice(1).join("=")
+            : "";
+
+          // s_v_web_id → verifyFp
+          const svMatch = document.cookie.match(/s_v_web_id=([^;]+)/);
+          const verifyFp = svMatch ? decodeURIComponent(svMatch[1]) : "";
+
+          // device_id từ SIGI_STATE hoặc __NEXT_DATA__
+          let deviceId = "";
+          let odinId = "";
+          let webIdLastTime = "";
+          try {
+            const ss = window.__SIGI_STATE__;
+            if (ss) {
+              deviceId = ss.AppContext?.appContext?.wid || ss.loginStore?.appId || "";
+              odinId = ss.AppContext?.appContext?.odinId || "";
+            }
+          } catch (_) {}
+          try {
+            const nd = window.__NEXT_DATA__;
+            if (nd) {
+              const ctx = nd.props?.pageProps?.appContext || {};
+              if (!deviceId) deviceId = ctx.wid || "";
+              if (!odinId) odinId = ctx.odinId || "";
+            }
+          } catch (_) {}
+
+          // Fallback: lấy từ URL params của request đã logged
+          if (!deviceId) {
+            const m = document.cookie.match(/tt-target-idc=([^;]+)/);
+          }
+
+          // WebIdLastTime từ cookie hoặc localStorage
+          try {
+            webIdLastTime = localStorage.getItem("WebIdLastTime") || "";
+          } catch (_) {}
+
+          return { msToken, verifyFp, deviceId, odinId, webIdLastTime };
+        });
+
+        console.log(`[FollowTool] Fingerprint: verifyFp=${pageFingerprint.verifyFp.substring(0,20)}..., deviceId=${pageFingerprint.deviceId}`);
+
+        // Build URL giống hệt cấu trúc TikTok thật (tham khảo từ URL follow thực tế)
         const followApiParams = new URLSearchParams({
-          secUid: secUid,
-          from: "0",
-          from_pre: "0",
-          enter_from: "user_profile",
-          action_type: "0",
+          WebIdLastTime: pageFingerprint.webIdLastTime || String(Math.floor(Date.now() / 1000) - 86400),
+          action_type: "0",  // 0 = follow
           aid: "1988",
-          app_language: "en",
+          app_language: "vi-VN",
           app_name: "tiktok_web",
-          browser_language: "en-US",
+          browser_language: "vi-VN",
           browser_name: "Mozilla",
           browser_online: "true",
           browser_platform: "MacIntel",
           browser_version: "5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.6 Safari/605.1.15",
           channel: "tiktok_web",
+          channel_id: "0",
           cookie_enabled: "true",
+          data_collection_enabled: "true",
+          device_id: pageFingerprint.deviceId || "",
           device_platform: "web_pc",
           focus_state: "true",
+          from: "18",
+          fromWeb: "1",
           from_page: "user",
-          history_len: "3",
+          from_pre: "0",
+          history_len: "5",
           is_fullscreen: "false",
           is_page_visible: "true",
+          odinId: pageFingerprint.odinId || "",
           os: "mac",
-          priority_region: "",
-          referer: "",
+          priority_region: "VN",
+          referer: targetUrl,
           region: "VN",
+          root_referer: "https://www.google.com/",
           screen_height: "1080",
           screen_width: "1920",
-          webcast_language: "en",
-          msToken: msToken2,
+          sec_user_id: secUid,
+          type: "1",
+          tz_name: "Asia/Saigon",
+          user_is_login: "true",
+          verifyFp: pageFingerprint.verifyFp,
+          webcast_language: "vi-VN",
+          msToken: pageFingerprint.msToken,
         });
 
         const unsignedFollowUrl = `https://www.tiktok.com/api/commit/follow/user/?${followApiParams.toString()}`;
