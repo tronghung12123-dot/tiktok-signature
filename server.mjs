@@ -1370,13 +1370,21 @@ async function handleRequest(req, res) {
       try {
         await initBrowser();
 
-        // Mở tab mới — KHÔNG dùng setRequestInterception
-        // vì interceptor của SDK tab không can thiệp vào tab khác trong Puppeteer
-        // (interception là per-page, không phải per-browser)
         followPage = await browser.newPage();
         await followPage.setUserAgent(DEFAULT_UA);
         await followPage.setViewport({ width: 1920, height: 1080 });
-        // KHÔNG gọi setRequestInterception để tránh block request follow API
+
+        // Block ảnh/media/font/css để tránh Chrome hết RAM crash (chrome-error://chromewebdata/)
+        // Chú ý: KHÔNG block XHR/fetch vì cần gọi API follow
+        await followPage.setRequestInterception(true);
+        followPage.on("request", (r) => {
+          const rt = r.resourceType();
+          if (["image", "media", "font", "stylesheet"].includes(rt)) {
+            r.abort();
+          } else {
+            r.continue();
+          }
+        });
 
         // Parse cookie string → array
         const cookieArray = [];
