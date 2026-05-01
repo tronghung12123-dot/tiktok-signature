@@ -1706,47 +1706,65 @@ async function handleRequest(req, res) {
         });
 
         const unsignedFollowUrl = `https://www.tiktok.com/api/commit/follow/user/?${followApiParams.toString()}`;
-        console.log(`[FollowTool] Ký URL follow...`);
+        console.log(`[FollowTool] Ký URL và gọi API trong followPage context...`);
 
-        // Ký URL qua SDK trên main page
-        let signedFollowUrl = null;
-        try {
-          const signResult = await generateSignedUrl(unsignedFollowUrl, null, null);
-          signedFollowUrl = signResult.signedUrl;
-          console.log(`[FollowTool] URL đã ký: ${signedFollowUrl.substring(0, 100)}...`);
-        } catch (signErr) {
-          console.log(`[FollowTool] Ký URL lỗi: ${signErr.message}, dùng URL chưa ký`);
-          signedFollowUrl = unsignedFollowUrl;
-        }
-
-        // Gọi API follow từ trong followPage context (đúng cookie + session TikTok)
-        console.log(`[FollowTool] Gọi API follow có signature...`);
-        const apiResult = await followPage.evaluate(async ({ signedUrl, cookieStr }) => {
+        // Ký URL + gọi API hoàn toàn trong followPage (same session, same CSRF, same cookies)
+        const apiResult = await followPage.evaluate(async (unsignedUrl) => {
           try {
-            // Lấy CSRF token từ cookie tt_csrf_token (bắt buộc với TikTok API)
+            // 1. Lấy CSRF token từ cookie của CHÍNH followPage này
             const csrfMatch = document.cookie.match(/tt_csrf_token=([^;]+)/);
             const csrfToken = csrfMatch ? decodeURIComponent(csrfMatch[1]) : "";
 
-            const resp = await fetch(signedUrl, {
+            // 2. Lấy msToken mới nhất từ cookie của followPage
+            const msTokenMatches = document.cookie.match(/msToken=([^;]+)/g) || [];
+            const msToken = msTokenMatches.length
+              ? msTokenMatches[msTokenMatches.length - 1].split("=").slice(1).join("=")
+              : "";
+
+            // 3. Cập nhật msToken trong URL với giá trị từ followPage
+            const urlObj = new URL(unsignedUrl);
+            if (msToken) urlObj.searchParams.set("msToken", msToken);
+
+            // 4. Ký URL dùng byted_acrawler SDK đã inject (nếu có)
+            let finalUrl = urlObj.toString();
+            if (window.byted_acrawler && typeof window.byted_acrawler.frontierSign === "function") {
+              try {
+                const signed = window.byted_acrawler.frontierSign(urlObj.search.slice(1));
+                if (signed && signed["X-Bogus"]) {
+                  urlObj.searchParams.set("X-Bogus", signed["X-Bogus"]);
+                  finalUrl = urlObj.toString();
+                }
+              } catch (_) {}
+            }
+
+            // 5. Gọi API với CSRF token lấy từ followPage (cùng session)
+            const resp = await fetch(finalUrl, {
               method: "POST",
               credentials: "include",
               headers: {
                 "Accept": "application/json, text/plain, */*",
                 "Content-Type": "application/x-www-form-urlencoded",
                 "Content-Length": "0",
-                "Referer": "https://www.tiktok.com/",
+                "Referer": location.href,
                 "Origin": "https://www.tiktok.com",
                 "X-CSRFToken": csrfToken,
               },
             });
+
             const text = await resp.text();
             let data = null;
             try { data = JSON.parse(text); } catch (_) {}
-            return { status: resp.status, text: text.substring(0, 500), data };
+            return {
+              status: resp.status,
+              text: text.substring(0, 500),
+              data,
+              csrfUsed: csrfToken.substring(0, 10) + "...",
+              msTokenUsed: msToken.substring(0, 20) + "...",
+            };
           } catch (e) {
             return { error: e.message };
           }
-        }, { signedUrl: signedFollowUrl, cookieStr: followCookieStr });
+        }, unsignedFollowUrl);
 
         console.log(`[FollowTool] API result: ${JSON.stringify(apiResult).substring(0, 300)}`);
 
