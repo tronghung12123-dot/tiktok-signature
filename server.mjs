@@ -1668,6 +1668,10 @@ async function handleRequest(req, res) {
         console.log(`[FollowTool] Gọi API follow có signature...`);
         const apiResult = await followPage.evaluate(async ({ signedUrl, cookieStr }) => {
           try {
+            // Lấy CSRF token từ cookie tt_csrf_token (bắt buộc với TikTok API)
+            const csrfMatch = document.cookie.match(/tt_csrf_token=([^;]+)/);
+            const csrfToken = csrfMatch ? decodeURIComponent(csrfMatch[1]) : "";
+
             const resp = await fetch(signedUrl, {
               method: "POST",
               credentials: "include",
@@ -1677,6 +1681,7 @@ async function handleRequest(req, res) {
                 "Content-Length": "0",
                 "Referer": "https://www.tiktok.com/",
                 "Origin": "https://www.tiktok.com",
+                "X-CSRFToken": csrfToken,
               },
             });
             const text = await resp.text();
