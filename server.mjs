@@ -1546,59 +1546,123 @@ async function handleRequest(req, res) {
           return;
         }
 
-        // Click follow — dùng waitForResponse để bắt API chắc chắn hơn
-        console.log(`[FollowTool] Đang click Follow...`);
-        const followApiPromise = followPage.waitForResponse(
-          r => r.url().includes("commit/follow/user"),
-          { timeout: 15000 }
-        ).catch(() => null); // null nếu timeout
+        // Lấy secUid từ trang để gọi API follow trực tiếp
+        console.log(`[FollowTool] Đang lấy secUid của @${username}...`);
+        const secUid = await followPage.evaluate(() => {
+          // Thử lấy từ __NEXT_DATA__ (SSR data)
+          try {
+            const nd = window.__NEXT_DATA__;
+            if (nd) {
+              const ud = nd.props?.pageProps?.userInfo?.user?.secUid
+                || nd.props?.pageProps?.userDetails?.user?.secUid;
+              if (ud) return ud;
+            }
+          } catch (_) {}
+          // Thử lấy từ SIGI_STATE
+          try {
+            const ss = window.__SIGI_STATE__;
+            if (ss) {
+              const users = ss.UserModule?.users || ss.userModule?.users || {};
+              const keys = Object.keys(users);
+              if (keys.length > 0) return users[keys[0]].secUid || null;
+            }
+          } catch (_) {}
+          // Thử lấy từ meta tag hoặc JSON-LD
+          try {
+            const scripts = Array.from(document.querySelectorAll('script[type="application/json"]'));
+            for (const s of scripts) {
+              const txt = s.textContent || "";
+              const m = txt.match(/"secUid"\s*:\s*"([^"]+)"/);
+              if (m) return m[1];
+            }
+          } catch (_) {}
+          return null;
+        });
 
-        await followButton.click();
-        console.log(`[FollowTool] Đã click Follow, đang chờ API response...`);
+        console.log(`[FollowTool] secUid: ${secUid ? secUid.substring(0, 30) + "..." : "không tìm thấy"}`);
 
-        // Chờ API response (waitForResponse đã set timeout 15s)
-        followResponse = await followApiPromise;
-        if (!followResponse) {
-          // Fallback: chờ thêm 3s rồi check
-          await new Promise(r => setTimeout(r, 3000));
-        }
-
-        if (followResponse) {
-          let respBody = "";
-          try { respBody = await followResponse.text(); } catch (_) {}
-          const statusCode = followResponse.status();
-          let parsedData = null;
-          try { parsedData = JSON.parse(respBody); } catch (_) {}
-          console.log(`[FollowTool] API HTTP ${statusCode}: ${respBody.substring(0, 200)}`);
-
-          res.writeHead(200);
-          res.end(JSON.stringify({
-            ok: statusCode === 200,
-            status_code: statusCode,
-            target_username: username,
-            target_url: targetUrl,
-            data: parsedData,
-            raw: respBody.substring(0, 200),
-            message: statusCode === 200
-              ? `Follow @${username} thành công`
-              : `Lỗi HTTP ${statusCode}`
-          }));
-        } else {
-          // Không bắt được API — kiểm tra text nút
+        if (!secUid) {
+          // Fallback: click nút nếu không lấy được secUid
+          console.log(`[FollowTool] Không có secUid, fallback click nút...`);
+          await followButton.click();
+          await new Promise(r => setTimeout(r, 5000));
           const newText = await followPage.evaluate(
             el => (el.innerText || "").trim(), followButton
           ).catch(() => "unknown");
           const likelySuccess = /following|unfollow/i.test(newText);
-          console.log(`[FollowTool] Không bắt được API response. Nút mới: "${newText}"`);
           res.writeHead(likelySuccess ? 200 : 500);
           res.end(JSON.stringify({
             ok: likelySuccess,
             target_username: username,
             target_url: targetUrl,
             message: likelySuccess
-              ? `Có vẻ đã follow @${username} (nút đổi thành "${newText}")`
-              : "Không nhận được phản hồi — có thể bị CAPTCHA hoặc chặn",
-            debug: { newButtonText: newText }
+              ? `Follow @${username} thành công (nút đổi thành "${newText}")`
+              : "Không lấy được secUid và click cũng không thành công",
+            debug: { newButtonText: newText, secUid: null }
+          }));
+          return;
+        }
+
+        // Gọi API follow trực tiếp từ trong browser context (có đủ cookie + session)
+        console.log(`[FollowTool] Gọi API follow trực tiếp cho secUid...`);
+        const apiResult = await followPage.evaluate(async (secUid) => {
+          try {
+            // Lấy msToken từ cookie
+            const msTokenMatch = document.cookie.match(/msToken=([^;]+)/);
+            const msToken = msTokenMatch ? msTokenMatch[1] : "";
+
+            const params = new URLSearchParams({
+              secUid: secUid,
+              from: "0",
+              from_pre: "0",
+              enter_from: "user_profile",
+              action_type: "0", // 0 = follow, 1 = unfollow
+            });
+
+            const resp = await fetch(`https://www.tiktok.com/api/commit/follow/user/?${params.toString()}`, {
+              method: "POST",
+              credentials: "include",
+              headers: {
+                "Accept": "application/json, text/plain, */*",
+                "Content-Type": "application/x-www-form-urlencoded",
+                "Content-Length": "0",
+                "Referer": location.href,
+                "Origin": "https://www.tiktok.com",
+              },
+            });
+
+            const text = await resp.text();
+            let data = null;
+            try { data = JSON.parse(text); } catch (_) {}
+            return { status: resp.status, text: text.substring(0, 500), data };
+          } catch (e) {
+            return { error: e.message };
+          }
+        }, secUid);
+
+        console.log(`[FollowTool] API result: ${JSON.stringify(apiResult).substring(0, 300)}`);
+
+        if (apiResult.error) {
+          res.writeHead(500);
+          res.end(JSON.stringify({
+            ok: false,
+            error: apiResult.error,
+            target_username: username,
+            message: "Lỗi khi gọi API follow trực tiếp"
+          }));
+        } else {
+          const success = apiResult.status === 200 && (!apiResult.data || apiResult.data.status_code === 0);
+          res.writeHead(200);
+          res.end(JSON.stringify({
+            ok: success,
+            status_code: apiResult.status,
+            target_username: username,
+            target_url: targetUrl,
+            data: apiResult.data,
+            raw: apiResult.text,
+            message: success
+              ? `Follow @${username} thành công`
+              : `API trả về lỗi (HTTP ${apiResult.status})`
           }));
         }
 
