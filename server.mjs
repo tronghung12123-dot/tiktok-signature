@@ -1159,10 +1159,16 @@ async function handleRequest(req, res) {
         }
 
         // BƯỚC 1: Vào trang chủ TikTok trước để set cookie đúng domain
-        await followPage.goto("https://www.tiktok.com/", {
-          waitUntil: "domcontentloaded",
-          timeout: 30000
-        });
+        // FIX: Bọc goto trong try/catch — timeout là bình thường trên Render
+        try {
+          await followPage.goto("https://www.tiktok.com/", {
+            waitUntil: "domcontentloaded",
+            timeout: 30000
+          });
+        } catch (e) {
+          console.log(`[Follow] goto trang chủ timeout (bỏ qua): ${e.message}`);
+        }
+        await new Promise(r => setTimeout(r, 2000));
 
         if (cookieArray.length > 0) {
           await followPage.setCookie(...cookieArray);
@@ -1176,13 +1182,18 @@ async function handleRequest(req, res) {
         });
 
         // BƯỚC 2: Navigate tới profile sau khi đã có cookie
-        // Dùng domcontentloaded thay networkidle2 — TikTok load request liên tục
-        // nên networkidle2 thường không bao giờ đạt được, gây timeout
+        // FIX: Bọc goto trong try/catch — TikTok SPA thường không resolve đúng hạn trên Render
         console.log(`[Follow] Navigating to https://www.tiktok.com/@${username}...`);
-        await followPage.goto(`https://www.tiktok.com/@${username}`, {
-          waitUntil: "domcontentloaded",
-          timeout: 60000
-        });
+        try {
+          await followPage.goto(`https://www.tiktok.com/@${username}`, {
+            waitUntil: "domcontentloaded",
+            timeout: 30000
+          });
+        } catch (e) {
+          console.log(`[Follow] goto profile timeout (bỏ qua): ${e.message}`);
+        }
+        // Chờ thêm để React render
+        await new Promise(r => setTimeout(r, 3000));
 
         const pageTitle = await followPage.title();
         const currentUrl = followPage.url();
@@ -1414,11 +1425,18 @@ async function handleRequest(req, res) {
         });
 
         // Bước 2: Navigate tới profile
+        // FIX: Bọc goto trong try/catch — timeout là bình thường trên Render
         console.log(`[FollowTool] Đang mở ${targetUrl}...`);
-        await followPage.goto(targetUrl, {
-          waitUntil: "domcontentloaded",
-          timeout: 60000
-        });
+        try {
+          await followPage.goto(targetUrl, {
+            waitUntil: "domcontentloaded",
+            timeout: 30000
+          });
+        } catch (e) {
+          console.log(`[FollowTool] goto timeout (bỏ qua): ${e.message}`);
+        }
+        // Chờ thêm để React render sau timeout
+        await new Promise(r => setTimeout(r, 3000));
 
         const pageTitle = await followPage.title();
         const currentUrl = followPage.url();
