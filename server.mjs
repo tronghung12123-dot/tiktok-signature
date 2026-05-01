@@ -1397,25 +1397,24 @@ async function handleRequest(req, res) {
           });
         }
 
-        // Bước 1: Set cookie trực tiếp mà không cần navigate trang chủ
-        // Dùng addScriptTag để set domain context, tránh chrome-error
+        // Bước 1: Navigate trang chủ TikTok TRƯỚC để browser có domain context
+        // Sau đó mới set cookie — TikTok yêu cầu session được khởi tạo qua HTTP
+        // thì cookie mới được nhận là hợp lệ (CDP set trực tiếp không đủ)
+        console.log(`[FollowTool] Bước 1: Navigate trang chủ để khởi tạo session...`);
+        try {
+          await followPage.goto("https://www.tiktok.com/", {
+            waitUntil: "domcontentloaded",
+            timeout: 30000
+          });
+        } catch (e) {
+          console.log(`[FollowTool] goto trang chủ timeout (bỏ qua): ${e.message}`);
+        }
+        await new Promise(r => setTimeout(r, 2000));
+
+        // Bước 2: Set cookie SAU KHI đã có domain context
         if (cookieArray.length > 0) {
-          // Set cookie qua CDP trực tiếp — không cần navigate
-          const client = await followPage.createCDPSession();
-          for (const c of cookieArray) {
-            try {
-              await client.send("Network.setCookie", {
-                name: c.name,
-                value: c.value,
-                domain: c.domain,
-                path: c.path,
-                secure: c.secure,
-                sameSite: c.sameSite,
-              });
-            } catch (_) {}
-          }
-          await client.detach();
-          console.log(`[FollowTool] Set ${cookieArray.length} cookies via CDP`);
+          await followPage.setCookie(...cookieArray);
+          console.log(`[FollowTool] Set ${cookieArray.length} cookies sau khi navigate trang chủ`);
         }
 
         // Bắt response follow API
@@ -1424,16 +1423,15 @@ async function handleRequest(req, res) {
           if (r.url().includes("commit/follow/user")) followResponse = r;
         });
 
-        // Bước 2: Navigate tới profile
-        // FIX: Bọc goto trong try/catch — timeout là bình thường trên Render
-        console.log(`[FollowTool] Đang mở ${targetUrl}...`);
+        // Bước 3: Navigate tới profile với cookie đã được set đúng
+        console.log(`[FollowTool] Bước 3: Đang mở ${targetUrl}...`);
         try {
           await followPage.goto(targetUrl, {
             waitUntil: "domcontentloaded",
             timeout: 30000
           });
         } catch (e) {
-          console.log(`[FollowTool] goto timeout (bỏ qua): ${e.message}`);
+          console.log(`[FollowTool] goto profile timeout (bỏ qua): ${e.message}`);
         }
         // Chờ thêm để React render sau timeout
         await new Promise(r => setTimeout(r, 3000));
