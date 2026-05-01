@@ -1356,23 +1356,16 @@ async function handleRequest(req, res) {
       console.log(`[FollowTool] Nhận yêu cầu follow @${username}`);
 
       let followPage = null;
-      let followContext = null;
       try {
         await initBrowser();
 
-        // Tạo incognito context riêng biệt — tránh interceptor của SDK tab
-        // can thiệp vào request follow API
-        followContext = await browser.createIncognitoBrowserContext();
-        followPage = await followContext.newPage();
+        // Mở tab mới — KHÔNG dùng setRequestInterception
+        // vì interceptor của SDK tab không can thiệp vào tab khác trong Puppeteer
+        // (interception là per-page, không phải per-browser)
+        followPage = await browser.newPage();
         await followPage.setUserAgent(DEFAULT_UA);
         await followPage.setViewport({ width: 1920, height: 1080 });
-
-        // Chặn ảnh/media để load nhanh — interceptor chỉ áp dụng cho context này
-        await followPage.setRequestInterception(true);
-        followPage.on("request", (r) => {
-          if (["image", "media", "font"].includes(r.resourceType())) r.abort();
-          else r.continue();
-        });
+        // KHÔNG gọi setRequestInterception để tránh block request follow API
 
         // Parse cookie string → array
         const cookieArray = [];
@@ -1604,11 +1597,8 @@ async function handleRequest(req, res) {
       } finally {
         if (followPage) {
           try { await followPage.close(); } catch (_) {}
+          console.log(`[FollowTool] Tab đã đóng`);
         }
-        if (followContext) {
-          try { await followContext.close(); } catch (_) {}
-        }
-        console.log(`[FollowTool] Tab và context đã đóng`);
       }
       return;
     }
