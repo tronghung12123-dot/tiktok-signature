@@ -1374,16 +1374,18 @@ async function handleRequest(req, res) {
         await followPage.setUserAgent(DEFAULT_UA);
         await followPage.setViewport({ width: 1920, height: 1080 });
 
-        // Block ảnh/media/font/css để tránh Chrome hết RAM crash (chrome-error://chromewebdata/)
-        // Chú ý: KHÔNG block XHR/fetch vì cần gọi API follow
-        await followPage.setRequestInterception(true);
-        followPage.on("request", (r) => {
-          const rt = r.resourceType();
-          if (["image", "media", "font", "stylesheet"].includes(rt)) {
-            r.abort();
-          } else {
-            r.continue();
-          }
+        // KHÔNG dùng setRequestInterception — nó làm TikTok React không gửi API call
+        // Chrome crash đã được fix bằng cách disable GPU + limit memory ở browser args
+        // Thay vào đó dùng CDP để block resource nặng mà không ảnh hưởng XHR/fetch
+        const cdpSession = await followPage.createCDPSession();
+        await cdpSession.send("Network.enable");
+        await cdpSession.send("Network.setBlockedURLs", {
+          urls: [
+            "*.jpg", "*.jpeg", "*.png", "*.gif", "*.webp", "*.svg",
+            "*.mp4", "*.webm", "*.mp3",
+            "*.woff", "*.woff2", "*.ttf",
+            "*.css"
+          ]
         });
 
         // Parse cookie string → array
@@ -1695,6 +1697,7 @@ async function handleRequest(req, res) {
           try { await followPage.close(); } catch (_) {}
           console.log(`[FollowTool] Tab đã đóng`);
         }
+        try { await cdpSession.detach(); } catch (_) {}
       }
       return;
     }
