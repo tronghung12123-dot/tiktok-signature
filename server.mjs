@@ -1425,10 +1425,18 @@ async function handleRequest(req, res) {
           console.log(`[FollowTool] Set ${cookieArray.length} cookies sau khi navigate trang chủ`);
         }
 
-        // Bắt response follow API
+        // Bắt TẤT CẢ API response — log đầy đủ để debug
         let followResponse = null;
-        followPage.on("response", (r) => {
-          if (r.url().includes("commit/follow/user")) followResponse = r;
+        followPage.on("response", async (r) => {
+          const u = r.url();
+          if (u.includes("commit/follow") || u.includes("follow/user")) {
+            followResponse = r;
+            console.log(`[FollowTool] *** FOLLOW API: ${r.status()} ${u.substring(0, 120)} ***`);
+          }
+          // Log tất cả API calls sau click để xem TikTok gửi gì
+          if (u.includes("/api/") && !u.includes("log") && !u.includes("monitor") && !u.includes("report")) {
+            console.log(`[FollowTool] API: ${r.status()} ${u.substring(0, 100)}`);
+          }
         });
 
         // Bước 3: Navigate tới profile với cookie đã được set đúng
