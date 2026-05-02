@@ -1611,187 +1611,66 @@ async function handleRequest(req, res) {
           return;
         }
 
-        // Lấy cookie + các params từ trang để build URL đúng chuẩn TikTok
-        const followCookies = await followPage.cookies();
-        const followCookieStr = followCookies.map(c => `${c.name}=${c.value}`).join("; ");
+        // Click nút Follow + bắt network request của chính followPage
+        // Đây là cách duy nhất đảm bảo CSRF token do TikTok tự tạo ra từ session này
+        console.log(`[FollowTool] Đăng ký bắt response follow API...`);
 
-        // Lấy thêm device_id, verifyFp, WebIdLastTime, odinId từ page context
-        const pageFingerprint = await followPage.evaluate(() => {
-          // msToken — lấy cái cuối cùng (mới nhất)
-          const msTokens = document.cookie.match(/msToken=([^;]+)/g) || [];
-          const msToken = msTokens.length
-            ? msTokens[msTokens.length - 1].split("=").slice(1).join("=")
-            : "";
+        // Đăng ký waitForResponse TRƯỚC khi click
+        const followApiPromise = followPage.waitForResponse(
+          r => r.url().includes("commit/follow/user"),
+          { timeout: 20000 }
+        ).catch(() => null);
 
-          // s_v_web_id → verifyFp
-          const svMatch = document.cookie.match(/s_v_web_id=([^;]+)/);
-          const verifyFp = svMatch ? decodeURIComponent(svMatch[1]) : "";
+        // Click nút Follow
+        console.log(`[FollowTool] Click Follow button...`);
+        await followPage.evaluate(el => {
+          // Dispatch cả mousedown + mouseup + click để TikTok React nhận đủ event
+          ['mousedown', 'mouseup', 'click'].forEach(type => {
+            el.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true }));
+          });
+        }, followButton);
 
-          // device_id từ SIGI_STATE hoặc __NEXT_DATA__
-          let deviceId = "";
-          let odinId = "";
-          let webIdLastTime = "";
-          try {
-            const ss = window.__SIGI_STATE__;
-            if (ss) {
-              deviceId = ss.AppContext?.appContext?.wid || ss.loginStore?.appId || "";
-              odinId = ss.AppContext?.appContext?.odinId || "";
-            }
-          } catch (_) {}
-          try {
-            const nd = window.__NEXT_DATA__;
-            if (nd) {
-              const ctx = nd.props?.pageProps?.appContext || {};
-              if (!deviceId) deviceId = ctx.wid || "";
-              if (!odinId) odinId = ctx.odinId || "";
-            }
-          } catch (_) {}
+        console.log(`[FollowTool] Đã click, chờ API response...`);
+        const followResponse2 = await followApiPromise;
 
-          // Fallback: lấy từ URL params của request đã logged
-          if (!deviceId) {
-            const m = document.cookie.match(/tt-target-idc=([^;]+)/);
-          }
-
-          // WebIdLastTime từ cookie hoặc localStorage
-          try {
-            webIdLastTime = localStorage.getItem("WebIdLastTime") || "";
-          } catch (_) {}
-
-          return { msToken, verifyFp, deviceId, odinId, webIdLastTime };
-        });
-
-        console.log(`[FollowTool] Fingerprint: verifyFp=${pageFingerprint.verifyFp.substring(0,20)}..., deviceId=${pageFingerprint.deviceId}`);
-
-        // Build URL giống hệt cấu trúc TikTok thật (tham khảo từ URL follow thực tế)
-        const followApiParams = new URLSearchParams({
-          WebIdLastTime: pageFingerprint.webIdLastTime || String(Math.floor(Date.now() / 1000) - 86400),
-          action_type: "0",  // 0 = follow
-          aid: "1988",
-          app_language: "vi-VN",
-          app_name: "tiktok_web",
-          browser_language: "vi-VN",
-          browser_name: "Mozilla",
-          browser_online: "true",
-          browser_platform: "MacIntel",
-          browser_version: "5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.6 Safari/605.1.15",
-          channel: "tiktok_web",
-          channel_id: "0",
-          cookie_enabled: "true",
-          data_collection_enabled: "true",
-          device_id: pageFingerprint.deviceId || "",
-          device_platform: "web_pc",
-          focus_state: "true",
-          from: "18",
-          fromWeb: "1",
-          from_page: "user",
-          from_pre: "0",
-          history_len: "5",
-          is_fullscreen: "false",
-          is_page_visible: "true",
-          odinId: pageFingerprint.odinId || "",
-          os: "mac",
-          priority_region: "VN",
-          referer: targetUrl,
-          region: "VN",
-          root_referer: "https://www.google.com/",
-          screen_height: "1080",
-          screen_width: "1920",
-          sec_user_id: secUid,
-          type: "1",
-          tz_name: "Asia/Saigon",
-          user_is_login: "true",
-          verifyFp: pageFingerprint.verifyFp,
-          webcast_language: "vi-VN",
-          msToken: pageFingerprint.msToken,
-        });
-
-        const unsignedFollowUrl = `https://www.tiktok.com/api/commit/follow/user/?${followApiParams.toString()}`;
-        console.log(`[FollowTool] Ký URL và gọi API trong followPage context...`);
-
-        // Ký URL + gọi API hoàn toàn trong followPage (same session, same CSRF, same cookies)
-        const apiResult = await followPage.evaluate(async (unsignedUrl) => {
-          try {
-            // 1. Lấy CSRF token từ cookie của CHÍNH followPage này
-            const csrfMatch = document.cookie.match(/tt_csrf_token=([^;]+)/);
-            const csrfToken = csrfMatch ? decodeURIComponent(csrfMatch[1]) : "";
-
-            // 2. Lấy msToken mới nhất từ cookie của followPage
-            const msTokenMatches = document.cookie.match(/msToken=([^;]+)/g) || [];
-            const msToken = msTokenMatches.length
-              ? msTokenMatches[msTokenMatches.length - 1].split("=").slice(1).join("=")
-              : "";
-
-            // 3. Cập nhật msToken trong URL với giá trị từ followPage
-            const urlObj = new URL(unsignedUrl);
-            if (msToken) urlObj.searchParams.set("msToken", msToken);
-
-            // 4. Ký URL dùng byted_acrawler SDK đã inject (nếu có)
-            let finalUrl = urlObj.toString();
-            if (window.byted_acrawler && typeof window.byted_acrawler.frontierSign === "function") {
-              try {
-                const signed = window.byted_acrawler.frontierSign(urlObj.search.slice(1));
-                if (signed && signed["X-Bogus"]) {
-                  urlObj.searchParams.set("X-Bogus", signed["X-Bogus"]);
-                  finalUrl = urlObj.toString();
-                }
-              } catch (_) {}
-            }
-
-            // 5. Gọi API với CSRF token lấy từ followPage (cùng session)
-            const resp = await fetch(finalUrl, {
-              method: "POST",
-              credentials: "include",
-              headers: {
-                "Accept": "application/json, text/plain, */*",
-                "Content-Type": "application/x-www-form-urlencoded",
-                "Content-Length": "0",
-                "Referer": location.href,
-                "Origin": "https://www.tiktok.com",
-                "X-CSRFToken": csrfToken,
-              },
-            });
-
-            const text = await resp.text();
-            let data = null;
-            try { data = JSON.parse(text); } catch (_) {}
-            return {
-              status: resp.status,
-              text: text.substring(0, 500),
-              data,
-              csrfUsed: csrfToken.substring(0, 10) + "...",
-              msTokenUsed: msToken.substring(0, 20) + "...",
-            };
-          } catch (e) {
-            return { error: e.message };
-          }
-        }, unsignedFollowUrl);
-
-        console.log(`[FollowTool] API result: ${JSON.stringify(apiResult).substring(0, 300)}`);
-
-        if (apiResult.error) {
-          res.writeHead(500);
-          res.end(JSON.stringify({
-            ok: false,
-            error: apiResult.error,
-            target_username: username,
-            message: "Lỗi khi gọi API follow"
-          }));
-        } else {
-          // TikTok trả data.status_code === 0 là thành công, hoặc body rỗng cũng ok
-          const tiktokCode = apiResult.data?.status_code;
-          const success = apiResult.status === 200 && (tiktokCode === 0 || tiktokCode === undefined);
+        if (followResponse2) {
+          let respBody = "";
+          try { respBody = await followResponse2.text(); } catch (_) {}
+          const statusCode = followResponse2.status();
+          let parsedData = null;
+          try { parsedData = JSON.parse(respBody); } catch (_) {}
+          const tiktokCode = parsedData?.status_code;
+          const success = statusCode === 200 && (tiktokCode === 0 || tiktokCode === undefined);
+          console.log(`[FollowTool] API HTTP ${statusCode}, tiktok_code=${tiktokCode}: ${respBody.substring(0, 200)}`);
           res.writeHead(200);
           res.end(JSON.stringify({
             ok: success,
-            status_code: apiResult.status,
+            status_code: statusCode,
             tiktok_status_code: tiktokCode,
             target_username: username,
             target_url: targetUrl,
-            data: apiResult.data,
-            raw: apiResult.text,
+            data: parsedData,
+            raw: respBody.substring(0, 200),
             message: success
               ? `Follow @${username} thành công`
               : `TikTok từ chối: status_code=${tiktokCode}`
+          }));
+        } else {
+          // Không bắt được API — check nút đổi text chưa
+          const newText = await followPage.evaluate(
+            el => (el.innerText || "").trim(), followButton
+          ).catch(() => "unknown");
+          const likelySuccess = /following|unfollow/i.test(newText);
+          console.log(`[FollowTool] Không bắt được API. Nút mới: "${newText}"`);
+          res.writeHead(likelySuccess ? 200 : 500);
+          res.end(JSON.stringify({
+            ok: likelySuccess,
+            target_username: username,
+            target_url: targetUrl,
+            message: likelySuccess
+              ? `Follow @${username} thành công (nút đổi thành "${newText}")`
+              : "Không nhận được API response — có thể bị CAPTCHA hoặc chặn",
+            debug: { newButtonText: newText }
           }));
         }
 
