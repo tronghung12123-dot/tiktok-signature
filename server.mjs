@@ -1326,8 +1326,7 @@ async function handleRequest(req, res) {
 
 
     // ========== ENDPOINT FOLLOW-FROM-TOOL ==========
-    // Nhận cookie + target_url (link profile TikTok) từ tool bên ngoài
-    // Đăng nhập bằng cookie rồi follow tài khoản trong link
+    // Gọi TikTok mobile API trực tiếp — giả lập TikTok Android app
     if (url.pathname === "/follow-from-tool" && req.method === "POST") {
       let body = "";
       for await (const chunk of req) body += chunk;
@@ -1336,371 +1335,310 @@ async function handleRequest(req, res) {
       try {
         const json = JSON.parse(body);
         cookie = json.cookie;
-        // Chấp nhận target_url hoặc username
         targetUrl = json.target_url || json.targetUrl || null;
         username = json.username || null;
-
-        // Nếu truyền target_url dạng https://www.tiktok.com/@username thì tách username
         if (targetUrl && !username) {
           const m = targetUrl.match(/@([^/?&]+)/);
           if (m) username = m[1];
         }
-        // Nếu truyền username thì tạo targetUrl
         if (username && !targetUrl) {
           targetUrl = `https://www.tiktok.com/@${username}`;
         }
       } catch (e) {
         res.writeHead(400);
-        res.end(JSON.stringify({ status: "error", message: "Invalid JSON. Cần: { cookie, target_url } hoặc { cookie, username }" }));
+        res.end(JSON.stringify({ status: "error", message: "Invalid JSON" }));
         return;
       }
 
       if (!cookie || !username) {
         res.writeHead(400);
-        res.end(JSON.stringify({
-          status: "error",
-          message: "Thiếu tham số. Cần: cookie (string) và target_url (https://www.tiktok.com/@username) hoặc username"
-        }));
+        res.end(JSON.stringify({ status: "error", message: "Thiếu cookie hoặc username/target_url" }));
         return;
       }
 
       console.log(`[FollowTool] Nhận yêu cầu follow @${username}`);
 
-      let followPage = null;
       try {
-        await initBrowser();
-
-        followPage = await browser.newPage();
-        await followPage.setUserAgent(DEFAULT_UA);
-        await followPage.setViewport({ width: 1920, height: 1080 });
-
-        // KHÔNG dùng setRequestInterception — nó làm TikTok React không gửi API call
-        // Chrome crash đã được fix bằng cách disable GPU + limit memory ở browser args
-        // Thay vào đó dùng CDP để block resource nặng mà không ảnh hưởng XHR/fetch
-        const cdpSession = await followPage.createCDPSession();
-        await cdpSession.send("Network.enable");
-        await cdpSession.send("Network.setBlockedURLs", {
-          urls: [
-            "*.jpg", "*.jpeg", "*.png", "*.gif", "*.webp", "*.svg",
-            "*.mp4", "*.webm", "*.mp3",
-            "*.woff", "*.woff2", "*.ttf",
-            "*.css"
-          ]
-        });
-
-        // Parse cookie string → array
-        const cookieArray = [];
+        // Parse cookie string → object
+        const cookieObj = {};
         for (const part of cookie.split(";")) {
           const p = part.trim();
           const idx = p.indexOf("=");
           if (idx === -1) continue;
-          const name = p.slice(0, idx).trim();
-          const value = p.slice(idx + 1).trim();
-          if (!name) continue;
-          cookieArray.push({
-            name, value,
-            domain: ".tiktok.com",
-            path: "/",
-            httpOnly: false,
-            secure: true,
-            sameSite: "None"
+          cookieObj[p.slice(0, idx).trim()] = p.slice(idx + 1).trim();
+        }
+
+        const sessionid = cookieObj["sessionid"] || "";
+        const msToken = (() => {
+          const all = cookie.match(/msToken=([^;]+)/g) || [];
+          return all.length ? all[all.length - 1].split("=").slice(1).join("=") : "";
+        })();
+        const csrfToken = cookieObj["tt_csrf_token"] || "";
+        const verifyFp = cookieObj["s_v_web_id"] || "";
+        const deviceId = cookieObj["odin_tt"] ? "7629627162782778888" : "";
+
+        if (!sessionid) {
+          res.writeHead(400);
+          res.end(JSON.stringify({ ok: false, error: "Không tìm thấy sessionid trong cookie" }));
+          return;
+        }
+
+        // Bước 1: Lấy secUid từ API TikTok (không cần browser)
+        console.log(`[FollowTool] Lấy secUid của @${username} qua API...`);
+        const userInfoUrl = `https://www.tiktok.com/api/user/detail/?uniqueId=${encodeURIComponent(username)}&aid=1988&app_name=tiktok_web&device_platform=web_pc&os=mac&region=VN&msToken=${msToken}`;
+
+        const https = await import("https");
+        const userInfoResult = await new Promise((resolve) => {
+          const reqOptions = new URL(userInfoUrl);
+          const options = {
+            hostname: reqOptions.hostname,
+            path: reqOptions.pathname + reqOptions.search,
+            method: "GET",
+            headers: {
+              "Cookie": cookie,
+              "User-Agent": DEFAULT_UA,
+              "Referer": "https://www.tiktok.com/",
+              "Accept": "application/json",
+            },
+          };
+          const r = https.request(options, (resp) => {
+            let data = "";
+            resp.on("data", d => data += d);
+            resp.on("end", () => {
+              try { resolve({ ok: true, data: JSON.parse(data) }); }
+              catch (e) { resolve({ ok: false, error: data.substring(0, 200) }); }
+            });
           });
-        }
-
-        // Bước 1: Navigate trang chủ TikTok TRƯỚC để browser có domain context
-        // Sau đó mới set cookie — TikTok yêu cầu session được khởi tạo qua HTTP
-        // thì cookie mới được nhận là hợp lệ (CDP set trực tiếp không đủ)
-        console.log(`[FollowTool] Bước 1: Navigate trang chủ để khởi tạo session...`);
-        try {
-          await followPage.goto("https://www.tiktok.com/", {
-            waitUntil: "domcontentloaded",
-            timeout: 30000
-          });
-        } catch (e) {
-          console.log(`[FollowTool] goto trang chủ timeout (bỏ qua): ${e.message}`);
-        }
-        await new Promise(r => setTimeout(r, 2000));
-
-        // Bước 2: Set cookie SAU KHI đã có domain context
-        if (cookieArray.length > 0) {
-          await followPage.setCookie(...cookieArray);
-          console.log(`[FollowTool] Set ${cookieArray.length} cookies sau khi navigate trang chủ`);
-        }
-
-        // Bắt TẤT CẢ API response — log đầy đủ để debug
-        let followResponse = null;
-        followPage.on("response", async (r) => {
-          const u = r.url();
-          if (u.includes("commit/follow") || u.includes("follow/user")) {
-            followResponse = r;
-            console.log(`[FollowTool] *** FOLLOW API: ${r.status()} ${u.substring(0, 120)} ***`);
-          }
-          // Log tất cả API calls sau click để xem TikTok gửi gì
-          if (u.includes("/api/") && !u.includes("log") && !u.includes("monitor") && !u.includes("report")) {
-            console.log(`[FollowTool] API: ${r.status()} ${u.substring(0, 100)}`);
-          }
+          r.on("error", e => resolve({ ok: false, error: e.message }));
+          r.setTimeout(15000, () => { r.destroy(); resolve({ ok: false, error: "timeout" }); });
+          r.end();
         });
 
-        // Bước 3: Navigate tới profile với cookie đã được set đúng
-        console.log(`[FollowTool] Bước 3: Đang mở ${targetUrl}...`);
-        try {
-          await followPage.goto(targetUrl, {
-            waitUntil: "domcontentloaded",
-            timeout: 30000
-          });
-        } catch (e) {
-          console.log(`[FollowTool] goto profile timeout (bỏ qua): ${e.message}`);
-        }
-        // Chờ thêm để React render sau timeout
-        await new Promise(r => setTimeout(r, 3000));
-
-        const pageTitle = await followPage.title();
-        const currentUrl = followPage.url();
-        console.log(`[FollowTool] Title: "${pageTitle}" | URL: ${currentUrl}`);
-
-        // Kiểm tra bị redirect (cookie hết hạn / sai)
-        if (!currentUrl.includes(`@${username}`)) {
-          throw new Error(`Cookie không hợp lệ hoặc hết hạn — bị redirect về: ${currentUrl}`);
+        let secUid = null;
+        if (userInfoResult.ok) {
+          secUid = userInfoResult.data?.userInfo?.user?.secUid
+            || userInfoResult.data?.user?.secUid
+            || null;
         }
 
-        // Scroll nhẹ để trigger lazy render của React
-        await followPage.evaluate(() => window.scrollBy(0, 300));
-        await new Promise(r => setTimeout(r, 1500));
-
-        // Tìm nút Follow — ưu tiên data-e2e chính xác trên profile
-        // Timeout 20s vì React cần thêm thời gian sau domcontentloaded
-        const SELECTORS = [
-          'button[data-e2e="follow-button"]',
-          'button[data-e2e="followButton"]',
-          '[data-e2e="follow-button"]',
-          '[data-e2e="followButton"]',
-        ];
-
-        let followButton = null;
-        let usedSelector = null;
-
-        for (const sel of SELECTORS) {
-          try {
-            // Chờ selector xuất hiện
-            await followPage.waitForSelector(sel, { timeout: 20000 });
-            // Sau đó lấy nút ĐẦU TIÊN — thường là nút trên profile header
-            // (các nút trong feed load sau, index cao hơn)
-            followButton = await followPage.evaluateHandle((s) => {
-              const all = Array.from(document.querySelectorAll(s));
-              // Ưu tiên nút nằm cao nhất trên trang (offsetTop nhỏ nhất)
-              if (all.length === 0) return null;
-              return all.reduce((a, b) => {
-                const aTop = a.getBoundingClientRect().top + window.scrollY;
-                const bTop = b.getBoundingClientRect().top + window.scrollY;
-                return aTop <= bTop ? a : b;
+        if (!secUid) {
+          // Fallback: dùng Puppeteer để lấy secUid
+          console.log(`[FollowTool] Fallback lấy secUid qua browser...`);
+          await initBrowser();
+          await ensurePageReady();
+          secUid = await page.evaluate(async (uname) => {
+            try {
+              const r = await fetch(`https://www.tiktok.com/api/user/detail/?uniqueId=${encodeURIComponent(uname)}&aid=1988&app_name=tiktok_web&device_platform=web_pc`, {
+                credentials: "include"
               });
-            }, sel);
-            const isNull = await followPage.evaluate(el => el === null, followButton);
-            if (!isNull) { usedSelector = sel; break; }
-          } catch (_) {}
+              const d = await r.json();
+              return d?.userInfo?.user?.secUid || null;
+            } catch (_) { return null; }
+          }, username);
         }
-
-        // Fallback: tìm đúng nút Follow của PROFILE (không phải suggested feed)
-        if (!followButton) {
-          followButton = await followPage.evaluateHandle(() => {
-            // Chiến lược 1: tìm trong vùng share-info / profile header
-            const profileArea = document.querySelector(
-              '[data-e2e="user-page"], [class*="ShareInfo"], [class*="profile-header"], [class*="userInfo"], main'
-            );
-            if (profileArea) {
-              const btn = profileArea.querySelector('[data-e2e="follow-button"], [data-e2e="followButton"]');
-              if (btn) return btn;
-            }
-            // Chiến lược 2: lấy nút follow-button ĐẦU TIÊN trên trang (trước feed)
-            const first = document.querySelector('[data-e2e="follow-button"], [data-e2e="followButton"]');
-            if (first) return first;
-            return null;
-          });
-          const isNull = await followPage.evaluate(el => el === null, followButton);
-          if (isNull) { followButton = null; } else { usedSelector = "evaluate-fallback"; }
-        }
-
-        // Debug: log tất cả button
-        const allButtons = await followPage.evaluate(() =>
-          Array.from(document.querySelectorAll("button"))
-            .map(b => ({ e2e: b.getAttribute("data-e2e"), text: (b.innerText || "").trim().substring(0, 40) }))
-        );
-        console.log(`[FollowTool] Buttons:`, JSON.stringify(allButtons));
-
-        if (!followButton) {
-          res.writeHead(500);
-          res.end(JSON.stringify({
-            ok: false,
-            error: "Không tìm thấy nút Follow",
-            message: "Trang chưa render đủ hoặc TikTok thay đổi selector",
-            debug: { pageTitle, currentUrl, allButtons }
-          }));
-          return;
-        }
-
-        const buttonText = await followPage.evaluate(el => (el.innerText || "").trim(), followButton);
-        console.log(`[FollowTool] Nút: "${buttonText}" (selector: ${usedSelector})`);
-
-        // Kiểm tra đã follow chưa
-        if (/following|unfollow/i.test(buttonText)) {
-          res.writeHead(200);
-          res.end(JSON.stringify({
-            ok: true,
-            already_followed: true,
-            message: `Đã follow @${username} trước đó rồi`,
-            button_text: buttonText
-          }));
-          return;
-        }
-
-        if (!buttonText.toLowerCase().includes("follow")) {
-          res.writeHead(200);
-          res.end(JSON.stringify({
-            ok: false,
-            error: `Nút không phải Follow ("${buttonText}")`,
-            message: "Cookie có thể thuộc tài khoản khác hoặc chưa đăng nhập",
-            debug: { pageTitle, buttonText }
-          }));
-          return;
-        }
-
-        // Lấy secUid từ trang để gọi API follow trực tiếp
-        console.log(`[FollowTool] Đang lấy secUid của @${username}...`);
-        const secUid = await followPage.evaluate(() => {
-          // Thử lấy từ __NEXT_DATA__ (SSR data)
-          try {
-            const nd = window.__NEXT_DATA__;
-            if (nd) {
-              const ud = nd.props?.pageProps?.userInfo?.user?.secUid
-                || nd.props?.pageProps?.userDetails?.user?.secUid;
-              if (ud) return ud;
-            }
-          } catch (_) {}
-          // Thử lấy từ SIGI_STATE
-          try {
-            const ss = window.__SIGI_STATE__;
-            if (ss) {
-              const users = ss.UserModule?.users || ss.userModule?.users || {};
-              const keys = Object.keys(users);
-              if (keys.length > 0) return users[keys[0]].secUid || null;
-            }
-          } catch (_) {}
-          // Thử lấy từ meta tag hoặc JSON-LD
-          try {
-            const scripts = Array.from(document.querySelectorAll('script[type="application/json"]'));
-            for (const s of scripts) {
-              const txt = s.textContent || "";
-              const m = txt.match(/"secUid"\s*:\s*"([^"]+)"/);
-              if (m) return m[1];
-            }
-          } catch (_) {}
-          return null;
-        });
 
         console.log(`[FollowTool] secUid: ${secUid ? secUid.substring(0, 30) + "..." : "không tìm thấy"}`);
 
         if (!secUid) {
-          // Fallback: click nút nếu không lấy được secUid
-          console.log(`[FollowTool] Không có secUid, fallback click nút...`);
-          await followButton.click();
-          await new Promise(r => setTimeout(r, 5000));
-          const newText = await followPage.evaluate(
-            el => (el.innerText || "").trim(), followButton
-          ).catch(() => "unknown");
-          const likelySuccess = /following|unfollow/i.test(newText);
-          res.writeHead(likelySuccess ? 200 : 500);
-          res.end(JSON.stringify({
-            ok: likelySuccess,
-            target_username: username,
-            target_url: targetUrl,
-            message: likelySuccess
-              ? `Follow @${username} thành công (nút đổi thành "${newText}")`
-              : "Không lấy được secUid và click cũng không thành công",
-            debug: { newButtonText: newText, secUid: null }
-          }));
+          res.writeHead(500);
+          res.end(JSON.stringify({ ok: false, error: `Không lấy được secUid của @${username}` }));
           return;
         }
 
-        // Click nút Follow + bắt network request của chính followPage
-        // Đây là cách duy nhất đảm bảo CSRF token do TikTok tự tạo ra từ session này
-        console.log(`[FollowTool] Đăng ký bắt response follow API...`);
+        // Bước 2: Ký URL follow qua SDK
+        const followParams = new URLSearchParams({
+          secUid,
+          action_type: "0",
+          aid: "1988",
+          app_name: "tiktok_web",
+          browser_language: "vi-VN",
+          browser_name: "Mozilla",
+          browser_online: "true",
+          browser_platform: "MacIntel",
+          browser_version: "5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.6 Safari/605.1.15",
+          channel: "tiktok_web",
+          cookie_enabled: "true",
+          device_platform: "web_pc",
+          focus_state: "true",
+          from: "18",
+          fromWeb: "1",
+          from_page: "user",
+          from_pre: "0",
+          history_len: "5",
+          is_fullscreen: "false",
+          is_page_visible: "true",
+          os: "mac",
+          priority_region: "VN",
+          referer: targetUrl,
+          region: "VN",
+          screen_height: "1080",
+          screen_width: "1920",
+          type: "1",
+          tz_name: "Asia/Saigon",
+          user_is_login: "true",
+          verifyFp,
+          webcast_language: "vi-VN",
+          msToken,
+        });
 
-        // Đăng ký waitForResponse TRƯỚC khi click
-        const followApiPromise = followPage.waitForResponse(
-          r => r.url().includes("commit/follow/user"),
-          { timeout: 20000 }
-        ).catch(() => null);
+        const unsignedUrl = `https://www.tiktok.com/api/commit/follow/user/?${followParams.toString()}`;
+        console.log(`[FollowTool] Ký URL follow...`);
 
-        // Click nút Follow
-        console.log(`[FollowTool] Click Follow button...`);
-        await followPage.evaluate(el => {
-          // Dispatch cả mousedown + mouseup + click để TikTok React nhận đủ event
-          ['mousedown', 'mouseup', 'click'].forEach(type => {
-            el.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true }));
-          });
-        }, followButton);
+        await initBrowser();
+        await ensurePageReady();
 
-        console.log(`[FollowTool] Đã click, chờ API response...`);
-        const followResponse2 = await followApiPromise;
-
-        if (followResponse2) {
-          let respBody = "";
-          try { respBody = await followResponse2.text(); } catch (_) {}
-          const statusCode = followResponse2.status();
-          let parsedData = null;
-          try { parsedData = JSON.parse(respBody); } catch (_) {}
-          const tiktokCode = parsedData?.status_code;
-          const success = statusCode === 200 && (tiktokCode === 0 || tiktokCode === undefined);
-          console.log(`[FollowTool] API HTTP ${statusCode}, tiktok_code=${tiktokCode}: ${respBody.substring(0, 200)}`);
-          res.writeHead(200);
-          res.end(JSON.stringify({
-            ok: success,
-            status_code: statusCode,
-            tiktok_status_code: tiktokCode,
-            target_username: username,
-            target_url: targetUrl,
-            data: parsedData,
-            raw: respBody.substring(0, 200),
-            message: success
-              ? `Follow @${username} thành công`
-              : `TikTok từ chối: status_code=${tiktokCode}`
-          }));
-        } else {
-          // Không bắt được API — check nút đổi text chưa
-          const newText = await followPage.evaluate(
-            el => (el.innerText || "").trim(), followButton
-          ).catch(() => "unknown");
-          const likelySuccess = /following|unfollow/i.test(newText);
-          console.log(`[FollowTool] Không bắt được API. Nút mới: "${newText}"`);
-          res.writeHead(likelySuccess ? 200 : 500);
-          res.end(JSON.stringify({
-            ok: likelySuccess,
-            target_username: username,
-            target_url: targetUrl,
-            message: likelySuccess
-              ? `Follow @${username} thành công (nút đổi thành "${newText}")`
-              : "Không nhận được API response — có thể bị CAPTCHA hoặc chặn",
-            debug: { newButtonText: newText }
-          }));
+        // Set cookie của user vào main page để ký với đúng session
+        const cookieArray = [];
+        for (const [name, value] of Object.entries(cookieObj)) {
+          cookieArray.push({ name, value, domain: ".tiktok.com", path: "/" });
         }
+        try { await page.setCookie(...cookieArray); } catch (_) {}
+
+        const signResult = await generateSignedUrl(unsignedUrl);
+        const signedUrl = signResult.signedUrl;
+        console.log(`[FollowTool] URL đã ký, gọi API...`);
+
+        // Bước 3: Gọi API follow qua HTTPS trực tiếp với cookie + csrf
+        const followResult = await new Promise((resolve) => {
+          const reqUrl = new URL(signedUrl);
+          const options = {
+            hostname: reqUrl.hostname,
+            path: reqUrl.pathname + reqUrl.search,
+            method: "POST",
+            headers: {
+              "Cookie": cookie,
+              "User-Agent": DEFAULT_UA,
+              "Referer": targetUrl,
+              "Origin": "https://www.tiktok.com",
+              "Accept": "application/json, text/plain, */*",
+              "Content-Type": "application/x-www-form-urlencoded",
+              "Content-Length": "0",
+              "X-CSRFToken": csrfToken,
+            },
+          };
+          const r = https.request(options, (resp) => {
+            let data = "";
+            resp.on("data", d => data += d);
+            resp.on("end", () => {
+              try { resolve({ status: resp.statusCode, data: JSON.parse(data), raw: data.substring(0, 300) }); }
+              catch (e) { resolve({ status: resp.statusCode, raw: data.substring(0, 300), data: null }); }
+            });
+          });
+          r.on("error", e => resolve({ error: e.message }));
+          r.setTimeout(20000, () => { r.destroy(); resolve({ error: "timeout" }); });
+          r.end();
+        });
+
+        console.log(`[FollowTool] Result: ${JSON.stringify(followResult).substring(0, 300)}`);
+
+        const tiktokCode = followResult.data?.status_code;
+        const success = followResult.status === 200 && (tiktokCode === 0 || tiktokCode === undefined);
+
+        res.writeHead(200);
+        res.end(JSON.stringify({
+          ok: success,
+          status_code: followResult.status,
+          tiktok_status_code: tiktokCode,
+          target_username: username,
+          target_url: targetUrl,
+          data: followResult.data,
+          raw: followResult.raw,
+          message: success
+            ? `Follow @${username} thành công`
+            : followResult.error
+              ? `Lỗi: ${followResult.error}`
+              : `TikTok từ chối: status_code=${tiktokCode}`
+        }));
 
       } catch (e) {
         console.error("[FollowTool] Lỗi:", e.message);
         res.writeHead(500);
-        res.end(JSON.stringify({
-          ok: false,
-          error: e.message,
-          message: "Lỗi server khi thực hiện follow"
-        }));
-      } finally {
-        if (followPage) {
-          try { await followPage.close(); } catch (_) {}
-          console.log(`[FollowTool] Tab đã đóng`);
-        }
-        try { await cdpSession.detach(); } catch (_) {}
+        res.end(JSON.stringify({ ok: false, error: e.message, message: "Lỗi server" }));
       }
       return;
     }
+
+    // ========== ENDPOINT FOLLOW-APP (GIẢ LẬP MOBILE) ==========
+    if (url.pathname === "/follow-app" && req.method === "POST") {
+      let body = "";
+      for await (const chunk of req) body += chunk;
+
+      let cookie, username, targetUrl;
+      try {
+        const json = JSON.parse(body);
+        cookie = json.cookie;
+        username = json.username || null;
+        targetUrl = json.target_url || json.targetUrl || null;
+        if (targetUrl && !username) {
+          const m = targetUrl.match(/@([^/?&]+)/);
+          if (m) username = m[1];
+        }
+        if (username && !targetUrl) targetUrl = `https://www.tiktok.com/@${username}`;
+      } catch (e) {
+        res.writeHead(400);
+        res.end(JSON.stringify({ ok: false, error: "Invalid JSON" }));
+        return;
+      }
+
+      if (!cookie || !username) {
+        res.writeHead(400);
+        res.end(JSON.stringify({ ok: false, error: "Cần cookie và username/target_url" }));
+        return;
+      }
+
+      console.log(`[FollowApp] Follow @${username} via mobile API...`);
+
+      try {
+        // Gọi Python mobile microservice (chạy trên port 8081)
+        console.log(`[FollowApp] Gọi Python mobile service cho @${username}...`);
+
+        const http = await import("http");
+        const pyResult = await new Promise((resolve) => {
+          const payload = JSON.stringify({ cookie, username, target_url: targetUrl });
+          const options = {
+            hostname: "127.0.0.1",
+            port: 8081,
+            path: "/mobile/follow",
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "Content-Length": Buffer.byteLength(payload),
+            },
+          };
+          const r = http.request(options, (resp) => {
+            let data = "";
+            resp.on("data", (d) => data += d);
+            resp.on("end", () => {
+              try { resolve({ ok: true, data: JSON.parse(data) }); }
+              catch (_) { resolve({ ok: false, error: data.substring(0, 200) }); }
+            });
+          });
+          r.on("error", (e) => resolve({ ok: false, error: e.message }));
+          r.setTimeout(30000, () => { r.destroy(); resolve({ ok: false, error: "Python service timeout" }); });
+          r.write(payload);
+          r.end();
+        });
+
+        console.log(`[FollowApp] Python service result: ${JSON.stringify(pyResult).substring(0, 200)}`);
+
+        if (!pyResult.ok) {
+          res.writeHead(500);
+          res.end(JSON.stringify({ ok: false, error: pyResult.error, message: "Python mobile service lỗi" }));
+          return;
+        }
+
+        const r = pyResult.data;
+        res.writeHead(200);
+        res.end(JSON.stringify(r));
+
+      } catch (e) {
+        console.error("[FollowApp] Lỗi:", e.message);
+        res.writeHead(500);
+        res.end(JSON.stringify({ ok: false, error: e.message }));
+      }
+      return;
+    }
+
 
     // 404
     res.writeHead(404);
@@ -1727,9 +1665,33 @@ server.listen(PORT, () => {
   console.log(`  GET  /health    - Health check`);
   console.log(`  GET  /restart   - Restart browser session`);
   console.log(`  POST /follow-from-tool - Follow từ tool ngoài (cookie + target_url)`);
+  console.log(`  POST /follow-app       - Follow via TikTok mobile API (cookie + username)`);
 
   // Initialize browser on startup
   initBrowser().catch((e) => console.error("[Server] Init failed:", e.message));
+
+  // Auto-start Python mobile microservice
+  (async () => {
+    try {
+      const { spawn } = await import("child_process");
+      const servicePath = path.join(__dirname, "tiktok_mobile_service.py");
+      if (fs.existsSync(servicePath)) {
+        const svc = spawn("python3", [servicePath], {
+          detached: false,
+          stdio: ["ignore", "pipe", "pipe"],
+          env: { ...process.env, MOBILE_SERVICE_PORT: "8081" },
+        });
+        svc.stdout.on("data", (d) => process.stdout.write("[PySvc] " + d));
+        svc.stderr.on("data", (d) => process.stderr.write("[PySvc] " + d));
+        svc.on("exit", (code) => console.log(`[PySvc] Exited with code ${code}`));
+        console.log("[Server] Python mobile service started (PID:", svc.pid, ")");
+      } else {
+        console.log("[Server] tiktok_mobile_service.py not found — /follow-app sẽ không hoạt động");
+      }
+    } catch (e) {
+      console.error("[Server] Không thể khởi động Python service:", e.message);
+    }
+  })();
 });
 
 // Graceful shutdown
