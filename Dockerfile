@@ -4,25 +4,25 @@ WORKDIR /usr
 
 # 1. Install Node.js 20 (LTS)
 RUN apt-get update && apt-get install -y curl ca-certificates && \
-    curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
-    apt-get install -y nodejs && \
-    npm install -g pm2
+   curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
+   apt-get install -y nodejs && \
+   npm install -g pm2
 
 # 2. Install WebKit dependencies
 RUN npx playwright install-deps
 
 # 3. Install Chromium dependencies
 RUN apt-get install -y libnss3 \
-    libxss1 \
-    libasound2
+   libxss1 \
+   libasound2
 
 # 4. Install Firefox dependencies
 RUN apt-get install -y libdbus-glib-1-2 \
-    libxt6
+   libxt6
 
 # 5. Install Python3 + pip + dependencies cho mobile signing
 RUN apt-get install -y python3 python3-pip && \
-    pip3 install pycryptodome --break-system-packages
+   pip3 install pycryptodome
 
 # 6. Clean up
 RUN apt-get clean && rm -rf /var/lib/apt/lists/*
