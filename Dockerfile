@@ -2,7 +2,7 @@ FROM ubuntu:22.04 AS tiktok_signature.build
 
 WORKDIR /usr
 
-# 1. Install Node.js 20 (LTS)
+# 1. Install Node.js 20 (LTS) + pm2
 RUN apt-get update && apt-get install -y curl ca-certificates && \
     curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
     apt-get install -y nodejs && \
@@ -27,12 +27,12 @@ RUN apt-get install -y python3 python3-pip && \
 # 6. Clean up
 RUN apt-get clean && rm -rf /var/lib/apt/lists/*
 
-# 7. Copy files
-COPY package.json package.json
-COPY package-lock.json package-lock.json
+# 7. Copy files và cài Node dependencies
+COPY package.json ./
+COPY package-lock.json ./
 RUN npm ci --omit=dev
 COPY . .
 
+# 8. Mở cổng và chạy server
 EXPOSE 8080
-
-CMD ["node", "server.js"]
+CMD ["node", "server.mjs"]
