@@ -10,6 +10,7 @@
  * - POST /fetch     - Fetch through browser (slower, but 100% reliable fallback)
  * - GET  /health    - Health check
  * - GET  /restart   - Restart browser session
+ * - POST /follow-mobile - Follow user via Mobile API (calls Python signer)
  *
  * Environment Variables:
  * - PORT          - Server port (default: 8080)
@@ -1558,87 +1559,95 @@ async function handleRequest(req, res) {
       return;
     }
 
-    // ========== ENDPOINT FOLLOW-APP (GIẢ LẬP MOBILE) ==========
-    if (url.pathname === "/follow-app" && req.method === "POST") {
-      let body = "";
+    // ── /follow-mobile: Follow via Mobile API (gọi Python signer) ──
+    if (url.pathname === '/follow-mobile' && req.method === 'POST') {
+      let body = '';
       for await (const chunk of req) body += chunk;
 
       let cookie, username, targetUrl;
       try {
         const json = JSON.parse(body);
         cookie = json.cookie;
-        username = json.username || null;
-        targetUrl = json.target_url || json.targetUrl || null;
+        username = json.username;
+        targetUrl = json.target_url;
         if (targetUrl && !username) {
-          const m = targetUrl.match(/@([^/?&]+)/);
-          if (m) username = m[1];
+          const match = targetUrl.match(/@([^/?&]+)/);
+          if (match) username = match[1];
         }
-        if (username && !targetUrl) targetUrl = `https://www.tiktok.com/@${username}`;
       } catch (e) {
         res.writeHead(400);
-        res.end(JSON.stringify({ ok: false, error: "Invalid JSON" }));
+        res.end(JSON.stringify({ ok: false, error: 'Invalid JSON' }));
         return;
       }
 
       if (!cookie || !username) {
         res.writeHead(400);
-        res.end(JSON.stringify({ ok: false, error: "Cần cookie và username/target_url" }));
+        res.end(JSON.stringify({ ok: false, error: 'Thiếu cookie hoặc username' }));
         return;
       }
 
-      console.log(`[FollowApp] Follow @${username} via mobile API...`);
-
       try {
-        // Gọi Python mobile microservice (chạy trên port 8081)
-        console.log(`[FollowApp] Gọi Python mobile service cho @${username}...`);
+        console.log(`[FollowMobile] Đang follow @${username}...`);
 
-        const http = await import("http");
-        const pyResult = await new Promise((resolve) => {
-          const payload = JSON.stringify({ cookie, username, target_url: targetUrl });
-          const options = {
-            hostname: "127.0.0.1",
-            port: 8081,
-            path: "/mobile/follow",
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              "Content-Length": Buffer.byteLength(payload),
-            },
-          };
-          const r = http.request(options, (resp) => {
-            let data = "";
-            resp.on("data", (d) => data += d);
-            resp.on("end", () => {
-              try { resolve({ ok: true, data: JSON.parse(data) }); }
-              catch (_) { resolve({ ok: false, error: data.substring(0, 200) }); }
-            });
-          });
-          r.on("error", (e) => resolve({ ok: false, error: e.message }));
-          r.setTimeout(30000, () => { r.destroy(); resolve({ ok: false, error: "Python service timeout" }); });
-          r.write(payload);
-          r.end();
+        // Gọi Python mobile_signer.py qua child_process
+        const { spawn } = await import('child_process');
+        const python = spawn('python3', ['mobile_signer.py'], {
+          cwd: process.cwd(),
+          stdio: ['pipe', 'pipe', 'pipe']
         });
 
-        console.log(`[FollowApp] Python service result: ${JSON.stringify(pyResult).substring(0, 200)}`);
+        const inputData = JSON.stringify({
+          query: '',           // query string đầy đủ sẽ được mobile_signer.py tự xây dựng
+          ts: Math.floor(Date.now() / 1000),
+          device_id: '7629627162782778888',
+          cookie: cookie
+        });
 
-        if (!pyResult.ok) {
+        let output = '';
+        let errorOut = '';
+
+        python.stdout.on('data', (data) => output += data.toString());
+        python.stderr.on('data', (data) => errorOut += data.toString());
+
+        python.on('close', async (code) => {
+          if (code !== 0) {
+            res.writeHead(500);
+            res.end(JSON.stringify({ ok: false, error: `Python signer lỗi: ${errorOut}` }));
+            return;
+          }
+
+          try {
+            const signResult = JSON.parse(output);
+            console.log('[FollowMobile] Chữ ký:', JSON.stringify(signResult).slice(0, 200));
+
+            // TODO: Dùng chữ ký để gọi Mobile API follow tại đây
+            // Hiện tại trả về chữ ký để kiểm tra
+            res.writeHead(200);
+            res.end(JSON.stringify({
+              ok: true,
+              message: `Đã tạo chữ ký cho @${username}`,
+              signatures: signResult
+            }));
+          } catch (e) {
+            res.writeHead(500);
+            res.end(JSON.stringify({ ok: false, error: `Lỗi parse JSON từ Python: ${output}` }));
+          }
+        });
+
+        python.on('error', (err) => {
           res.writeHead(500);
-          res.end(JSON.stringify({ ok: false, error: pyResult.error, message: "Python mobile service lỗi" }));
-          return;
-        }
+          res.end(JSON.stringify({ ok: false, error: `Không thể chạy Python: ${err.message}` }));
+        });
 
-        const r = pyResult.data;
-        res.writeHead(200);
-        res.end(JSON.stringify(r));
+        python.stdin.write(inputData);
+        python.stdin.end();
 
       } catch (e) {
-        console.error("[FollowApp] Lỗi:", e.message);
         res.writeHead(500);
         res.end(JSON.stringify({ ok: false, error: e.message }));
       }
       return;
     }
-
 
     // 404
     res.writeHead(404);
@@ -1665,33 +1674,10 @@ server.listen(PORT, () => {
   console.log(`  GET  /health    - Health check`);
   console.log(`  GET  /restart   - Restart browser session`);
   console.log(`  POST /follow-from-tool - Follow từ tool ngoài (cookie + target_url)`);
-  console.log(`  POST /follow-app       - Follow via TikTok mobile API (cookie + username)`);
+  console.log(`  POST /follow-mobile    - Follow via Mobile API (Python signer)`);
 
   // Initialize browser on startup
   initBrowser().catch((e) => console.error("[Server] Init failed:", e.message));
-
-  // Auto-start Python mobile microservice
-  (async () => {
-    try {
-      const { spawn } = await import("child_process");
-      const servicePath = path.join(__dirname, "tiktok_mobile_service.py");
-      if (fs.existsSync(servicePath)) {
-        const svc = spawn("python3", [servicePath], {
-          detached: false,
-          stdio: ["ignore", "pipe", "pipe"],
-          env: { ...process.env, MOBILE_SERVICE_PORT: "8081" },
-        });
-        svc.stdout.on("data", (d) => process.stdout.write("[PySvc] " + d));
-        svc.stderr.on("data", (d) => process.stderr.write("[PySvc] " + d));
-        svc.on("exit", (code) => console.log(`[PySvc] Exited with code ${code}`));
-        console.log("[Server] Python mobile service started (PID:", svc.pid, ")");
-      } else {
-        console.log("[Server] tiktok_mobile_service.py not found — /follow-app sẽ không hoạt động");
-      }
-    } catch (e) {
-      console.error("[Server] Không thể khởi động Python service:", e.message);
-    }
-  })();
 });
 
 // Graceful shutdown
