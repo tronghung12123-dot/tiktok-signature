@@ -998,7 +998,7 @@ async function handleRequest(req, res) {
 
         // FIX 1: Reload sau khi set cookie để TikTok nhận đúng session đăng nhập
         try {
-          await followPage.reload({ waitUntil: "domcontentloaded", timeout: 20000 });
+          await followPage.reload({ waitUntil: "networkidle2", timeout: 25000 });
           console.log(`[Follow] Reload trang chủ sau khi set cookie`);
         } catch (e) {
           console.log(`[Follow] reload timeout (bỏ qua): ${e.message}`);
@@ -1014,16 +1014,18 @@ async function handleRequest(req, res) {
         });
 
         // BƯỚC 2: Navigate tới profile sau khi đã có session hợp lệ
+        // Dùng networkidle2 để đợi React fetch xong API profile
         console.log(`[Follow] Navigating to https://www.tiktok.com/@${username}...`);
         try {
           await followPage.goto(`https://www.tiktok.com/@${username}`, {
-            waitUntil: "domcontentloaded",
-            timeout: 25000
+            waitUntil: "networkidle2",
+            timeout: 35000
           });
         } catch (e) {
           console.log(`[Follow] goto profile timeout (bỏ qua): ${e.message}`);
         }
-        await new Promise(r => setTimeout(r, 3000));
+        // Chờ thêm để React render xong sau networkidle2
+        await new Promise(r => setTimeout(r, 4000));
 
         if (followTimedOut) throw new Error("Follow timed out sau navigate profile");
 
@@ -1036,11 +1038,20 @@ async function handleRequest(req, res) {
         }
 
         // FIX 2: Giảm timeout selector từ 15000 → 5000ms
+        // Nhưng trước tiên scroll xuống để trigger lazy render của React
+        try {
+          await followPage.evaluate(() => window.scrollBy(0, 300));
+        } catch (_) {}
+        await new Promise(r => setTimeout(r, 1500));
+
         const SELECTORS = [
           'button[data-e2e="follow-button"]',
           'button[data-e2e="followButton"]',
           '[data-e2e="follow-button"]',
           '[data-e2e="followButton"]',
+          // TikTok đôi khi dùng aria-label
+          'button[aria-label*="Follow"]',
+          'button[aria-label*="follow"]',
         ];
 
         let followButton = null;
@@ -1054,15 +1065,30 @@ async function handleRequest(req, res) {
           } catch (_) {}
         }
 
-        // Fallback: scan toàn bộ button theo text
+        // Fallback: scan toàn bộ button theo text — mở rộng regex
         if (!followButton && !followTimedOut) {
           console.log(`[Follow] Selector không khớp, đang scan text button...`);
           followButton = await followPage.evaluateHandle(() =>
-            Array.from(document.querySelectorAll("button"))
-              .find(b => /^\s*(Follow|Follow Back)\s*$/i.test(b.innerText || "")) || null
+            Array.from(document.querySelectorAll("button, [role='button']"))
+              .find(b => /^\s*(Follow|Follow Back|Theo dõi)\s*$/i.test(b.innerText || b.textContent || "")) || null
           );
           const isNull = await followPage.evaluate(el => el === null, followButton);
           if (isNull) { followButton = null; } else { usedSelector = "text-scan"; }
+        }
+
+        // Fallback 2: tìm button có chứa chữ Follow (không strict)
+        if (!followButton && !followTimedOut) {
+          console.log(`[Follow] Scan loose text...`);
+          followButton = await followPage.evaluateHandle(() => {
+            const allBtns = Array.from(document.querySelectorAll("button, [role='button']"));
+            // Loại bỏ nav buttons (Following, Friends...)
+            return allBtns.find(b => {
+              const t = (b.innerText || b.textContent || "").trim();
+              return /^Follow$/i.test(t);
+            }) || null;
+          });
+          const isNull = await followPage.evaluate(el => el === null, followButton);
+          if (isNull) { followButton = null; } else { usedSelector = "loose-text-scan"; }
         }
 
         // Log tất cả button để debug
