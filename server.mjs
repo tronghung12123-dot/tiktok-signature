@@ -374,6 +374,13 @@ const server = http.createServer(async (req, res) => {
       if (!secUid) {
         await initBrowser();
         await ensureReady();
+
+        // Set cookie của user vào browser để TikTok trả đúng data
+        const cookieArray = cookie.split(";")
+          .map(p => p.trim()).filter(p => p.includes("="))
+          .map(p => { const i = p.indexOf("="); return { name: p.slice(0,i).trim(), value: p.slice(i+1).trim(), domain: ".tiktok.com", path: "/" }; });
+        try { await page.setCookie(...cookieArray); } catch {}
+
         secUid = await page.evaluate(async (uname, ms) => {
           try {
             const r = await fetch(
