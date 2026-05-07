@@ -396,18 +396,31 @@ const server = http.createServer(async (req, res) => {
 
       if (!secUid) return json(500, { error: `Không lấy được secUid của @${username}` });
 
+      // Nhận fingerprint từ iPhone nếu có
+      const fp = parsed.fingerprint || {};
+      const browserPlatform = fp.browser_platform || "iPhone";
+      const browserVersion = fp.browser_version || "5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1";
+      const devicePlatform = fp.device_platform || "web_mobile";
+      const fpOs = fp.os || "ios";
+      const screenHeight = fp.screen_height || "896";
+      const screenWidth = fp.screen_width || "414";
+      const deviceId = fp.device_id || "7629627162782778888";
+      const browserUa = fp.user_agent || browserVersion;
+
       // Build URL follow chưa ký
       const params = new URLSearchParams({
         secUid, action_type: "0", aid: "1988", app_name: "tiktok_web",
         browser_language: "vi-VN", browser_name: "Mozilla", browser_online: "true",
-        browser_platform: "MacIntel",
-        browser_version: "5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.6 Safari/605.1.15",
-        channel: "tiktok_web", cookie_enabled: "true", device_platform: "web_pc",
+        browser_platform: browserPlatform,
+        browser_version: browserVersion,
+        channel: "tiktok_web", cookie_enabled: "true",
+        device_id: deviceId,
+        device_platform: devicePlatform,
         focus_state: "true", from: "18", fromWeb: "1", from_page: "user",
         from_pre: "0", history_len: "5", is_fullscreen: "false", is_page_visible: "true",
-        os: "mac", priority_region: "VN", region: "VN",
+        os: fpOs, priority_region: "VN", region: "VN",
         referer: `https://www.tiktok.com/@${username}`,
-        screen_height: "1080", screen_width: "1920", type: "1",
+        screen_height: screenHeight, screen_width: screenWidth, type: "1",
         tz_name: "Asia/Saigon", user_is_login: "true",
         verifyFp, webcast_language: "vi-VN", msToken,
       });
