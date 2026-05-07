@@ -1,38 +1,30 @@
-FROM ubuntu:22.04 AS tiktok_signature.build
+FROM node:20-slim
 
-WORKDIR /usr
-
-# 1. Install Node.js 20 (LTS) + pm2
-RUN apt-get update && apt-get install -y curl ca-certificates && \
-    curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
-    apt-get install -y nodejs && \
-    npm install -g pm2
-
-# 2. Install WebKit dependencies
-RUN npx playwright install-deps
-
-# 3. Install Chromium dependencies
-RUN apt-get install -y libnss3 \
+# Cài Chromium và dependencies
+RUN apt-get update && apt-get install -y \
+    chromium \
+    fonts-ipafont-gothic \
+    fonts-wqy-zenhei \
+    fonts-thai-tlwg \
+    fonts-kacst \
+    fonts-freefont-ttf \
     libxss1 \
-    libasound2
+    --no-install-recommends \
+    && rm -rf /var/lib/apt/lists/*
 
-# 4. Install Firefox dependencies
-RUN apt-get install -y libdbus-glib-1-2 \
-    libxt6
+# Set Puppeteer dùng Chromium đã cài
+ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
+ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
+ENV NODE_ENV=production
+ENV PORT=8080
 
-# 5. Install Python3 + pip + dependencies cho mobile signing
-RUN apt-get install -y python3 python3-pip && \
-    pip3 install pycryptodome
+WORKDIR /app
 
-# 6. Clean up
-RUN apt-get clean && rm -rf /var/lib/apt/lists/*
+COPY package*.json ./
+RUN npm ci --only=production
 
-# 7. Copy files và cài Node dependencies
-COPY package.json ./
-COPY package-lock.json ./
-RUN npm ci --omit=dev
 COPY . .
 
-# 8. Mở cổng và chạy server
 EXPOSE 8080
+
 CMD ["node", "server.mjs"]
