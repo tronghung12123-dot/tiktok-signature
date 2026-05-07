@@ -372,19 +372,22 @@ const server = http.createServer(async (req, res) => {
       let secUid = secUidInput || null;
 
       if (!secUid) {
-        // Thử lấy qua SDK browser (không gọi TikTok API trực tiếp từ server)
         await initBrowser();
         await ensureReady();
-        secUid = await page.evaluate(async (uname) => {
+        secUid = await page.evaluate(async (uname, ms) => {
           try {
-            const r = await fetch(`/api/user/detail/?uniqueId=${encodeURIComponent(uname)}&aid=1988&app_name=tiktok_web&device_platform=web_pc`, { credentials: "include" });
+            const r = await fetch(
+              `https://www.tiktok.com/api/user/detail/?uniqueId=${encodeURIComponent(uname)}&aid=1988&app_name=tiktok_web&device_platform=web_pc&os=mac&region=VN&msToken=${ms}`,
+              { credentials: "include" }
+            );
             const d = await r.json();
             return d?.userInfo?.user?.secUid || null;
-          } catch { return null; }
-        }, username);
+          } catch (e) { return null; }
+        }, username, msToken);
+        console.log(`[Server] secUid @${username}: ${secUid ? secUid.slice(0,20)+"..." : "not found"}`);
       }
 
-      if (!secUid) return json(500, { error: `Không lấy được secUid của @${username}. Truyền secUid trực tiếp vào request để bỏ qua bước này.` });
+      if (!secUid) return json(500, { error: `Không lấy được secUid của @${username}` });
 
       // Build URL follow chưa ký
       const params = new URLSearchParams({
